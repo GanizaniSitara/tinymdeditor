@@ -296,11 +296,13 @@ func editorShortcutFromKey(virtualKey uintptr) (string, bool) {
 	if int16(ctrl) >= 0 || int16(alt) < 0 {
 		return "", false
 	}
+	return hookedEditorShortcut(virtualKey)
+}
+
+func hookedEditorShortcut(virtualKey uintptr) (string, bool) {
 	switch virtualKey {
 	case 'A':
 		return "a", true
-	case 'C':
-		return "c", true
 	case 'V':
 		return "v", true
 	case 'X':
@@ -1101,6 +1103,7 @@ document.head.appendChild(sc);
 // Synchronous init — no async bridge calls, everything is instant
 (function() {
   var editor = document.getElementById('editor');
+  var preview = document.getElementById('preview');
   var editorPane = document.querySelector('.editor-pane');
   var savedEl = document.getElementById('saved');
   var fnameEl = document.getElementById('fname');
@@ -1253,6 +1256,15 @@ document.head.appendChild(sc);
     if (!text || !e.clipboardData) return;
     e.clipboardData.setData('text/plain', text);
     e.preventDefault();
+  });
+
+  preview.addEventListener('copy', function(e) {
+    var selection = window.getSelection();
+    var text = selection ? selection.toString() : '';
+    if (!text) return;
+    if (e.clipboardData) e.clipboardData.setData('text/plain', text);
+    e.preventDefault();
+    writeEditorClipboard(text);
   });
 
   editor.addEventListener('paste', function(e) {
