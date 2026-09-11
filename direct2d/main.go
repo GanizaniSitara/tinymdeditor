@@ -64,6 +64,10 @@ var (
 	setMenu              = user32.NewProc("SetMenu")
 	drawMenuBar          = user32.NewProc("DrawMenuBar")
 	messageBoxW          = user32.NewProc("MessageBoxW")
+	openClipboard        = user32.NewProc("OpenClipboard")
+	closeClipboard       = user32.NewProc("CloseClipboard")
+	emptyClipboard       = user32.NewProc("EmptyClipboard")
+	setClipboardData     = user32.NewProc("SetClipboardData")
 
 	// gdi32
 	createFontW  = gdi32.NewProc("CreateFontW")
@@ -71,6 +75,10 @@ var (
 
 	// kernel32
 	getModuleHandleW = kernel32.NewProc("GetModuleHandleW")
+	globalAlloc      = kernel32.NewProc("GlobalAlloc")
+	globalLock       = kernel32.NewProc("GlobalLock")
+	globalUnlock     = kernel32.NewProc("GlobalUnlock")
+	globalFree       = kernel32.NewProc("GlobalFree")
 
 	// comdlg32
 	getOpenFileNameW = comdlg32.NewProc("GetOpenFileNameW")
@@ -162,19 +170,24 @@ const (
 	mfSeparator = 0x0800
 	mbOk        = 0x0000
 	mbInfo      = 0x0040
+	mbIconError = 0x0010
 
-	idFileOpen   = 1001
-	idFileSave   = 1002
-	idFileSaveAs = 1003
-	idFilePrint  = 1004
-	idFileReveal = 1005
-	idFileExit   = 1006
-	idEditUndo   = 1101
-	idEditCut    = 1102
-	idEditCopy   = 1103
-	idEditPaste  = 1104
-	idEditAll    = 1105
-	idHelpAbout  = 1201
+	cfUnicodeText = 13
+	gmemMoveable  = 0x0002
+
+	idFileOpen     = 1001
+	idFileSave     = 1002
+	idFileSaveAs   = 1003
+	idFilePrint    = 1004
+	idFileReveal   = 1005
+	idFileExit     = 1006
+	idFileCopyPath = 1007
+	idEditUndo     = 1101
+	idEditCut      = 1102
+	idEditCopy     = 1103
+	idEditPaste    = 1104
+	idEditAll      = 1105
+	idHelpAbout    = 1201
 
 	SB_VERT          = 1
 	SIF_RANGE        = 0x01
@@ -264,6 +277,7 @@ func installMainMenu(hwnd uintptr) {
 	appendMenu(fileMenu, mfString, idFilePrint, "&Print...\tCtrl+P")
 	appendMenu(fileMenu, mfSeparator, 0, "")
 	appendMenu(fileMenu, mfString, idFileReveal, "Show in &Folder\tCtrl+E")
+	appendMenu(fileMenu, mfString, idFileCopyPath, "Copy File &Path\tCtrl+Shift+C")
 	appendMenu(fileMenu, mfSeparator, 0, "")
 	appendMenu(fileMenu, mfString, idFileExit, "E&xit")
 
@@ -305,6 +319,8 @@ func handleMenuCommand(id uintptr) bool {
 		printFormatted()
 	case idFileReveal:
 		openInFolder()
+	case idFileCopyPath:
+		copyCurrentFilePath()
 	case idFileExit:
 		destroyWindowProc.Call(mainHwnd)
 	case idEditUndo:
@@ -1464,6 +1480,57 @@ func openInFolder() {
 	shellExecuteW.Call(mainHwnd, uintptr(unsafe.Pointer(&verb[0])), uintptr(unsafe.Pointer(&exe[0])), uintptr(unsafe.Pointer(&params[0])), 0, 1)
 }
 
+func absoluteFilePath(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("save or open a file before copying its path")
+	}
+	return filepath.Abs(path)
+}
+
+func setUnicodeClipboardText(owner uintptr, value string) error {
+	text := utf16From(value)
+	bytes := uintptr(len(text) * 2)
+	handle, _, _ := globalAlloc.Call(gmemMoveable, bytes)
+	if handle == 0 {
+		return fmt.Errorf("could not allocate clipboard memory")
+	}
+	locked, _, _ := globalLock.Call(handle)
+	if locked == 0 {
+		globalFree.Call(handle)
+		return fmt.Errorf("could not lock clipboard memory")
+	}
+	copy(unsafe.Slice((*uint16)(unsafe.Pointer(locked)), len(text)), text)
+	globalUnlock.Call(handle)
+
+	opened, _, _ := openClipboard.Call(owner)
+	if opened == 0 {
+		globalFree.Call(handle)
+		return fmt.Errorf("the clipboard is currently unavailable")
+	}
+	defer closeClipboard.Call()
+	if emptied, _, _ := emptyClipboard.Call(); emptied == 0 {
+		globalFree.Call(handle)
+		return fmt.Errorf("could not clear the clipboard")
+	}
+	if stored, _, _ := setClipboardData.Call(cfUnicodeText, handle); stored == 0 {
+		globalFree.Call(handle)
+		return fmt.Errorf("could not write to the clipboard")
+	}
+	return nil
+}
+
+func copyCurrentFilePath() {
+	path, err := absoluteFilePath(currentFile)
+	if err == nil {
+		err = setUnicodeClipboardText(mainHwnd, path)
+	}
+	if err != nil {
+		body := utf16From(err.Error())
+		title := utf16From("Copy File Path")
+		messageBoxW.Call(mainHwnd, uintptr(unsafe.Pointer(&body[0])), uintptr(unsafe.Pointer(&title[0])), mbOk|mbIconError)
+	}
+}
+
 func showOpenDialog(hwnd uintptr) string {
 	buf := make([]uint16, 260)
 	filter := append(utf16From("Markdown Files (*.md)"), 0)
@@ -1538,6 +1605,8 @@ func handleShortcut(wParam uintptr) bool {
 	switch {
 	case wParam == VK_A:
 		sendMessageW.Call(editorHwnd, EM_SETSEL, 0, ^uintptr(0))
+	case wParam == VK_C && int16(shift) < 0:
+		copyCurrentFilePath()
 	case wParam == VK_C:
 		sendMessageW.Call(editorHwnd, WM_COPY, 0, 0)
 	case wParam == VK_V:
