@@ -816,6 +816,7 @@ var (
 	previewHwnd uintptr
 	editorFont  uintptr
 	currentFile string
+	lineEnding  = "\n"
 
 	currentBlocks []LayoutBlock
 	scrollY       float32
@@ -1194,6 +1195,11 @@ func renderPreview(hwnd uintptr) {
 	}
 
 	totalHeight = y + padding
+	maxScroll := max(float32(0), totalHeight-clientH)
+	if scrollY > maxScroll {
+		scrollY = maxScroll
+		invalidateRect.Call(hwnd, 0, 0)
+	}
 
 	// End draw — ID2D1RenderTarget::EndDraw is vtable index 49
 	var tag1, tag2 uint64
@@ -1204,6 +1210,7 @@ func renderPreview(hwnd uintptr) {
 	// Check for device loss (D2DERR_RECREATE_TARGET = 0x8899000C)
 	if hr == 0x8899000C {
 		discardDeviceResources()
+		invalidateRect.Call(hwnd, 0, 0)
 	}
 
 	// Update scrollbar
@@ -1280,10 +1287,6 @@ func mainWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		moveWindow.Call(editorHwnd, 0, 0, uintptr(half-divider/2), uintptr(h), 1)
 		moveWindow.Call(previewHwnd, uintptr(half+divider/2), 0, uintptr(w-half-divider/2), uintptr(h), 1)
 
-		// Recreate render target with new size
-		if res.renderTarget != 0 {
-			discardDeviceResources()
-		}
 		return 0
 
 	case WM_COMMAND:
@@ -1403,6 +1406,7 @@ func updatePreview() {
 	if length == 0 {
 		currentBlocks = nil
 		scrollY = 0
+		totalHeight = 0
 		invalidateRect.Call(previewHwnd, 0, 0)
 		return
 	}
@@ -1439,7 +1443,7 @@ func saveFile() {
 		saveFileAs()
 		return
 	}
-	os.WriteFile(currentFile, []byte(editorText()), 0644)
+	os.WriteFile(currentFile, []byte(documentText()), 0644)
 }
 
 func saveFileAs() {
@@ -1447,7 +1451,7 @@ func saveFileAs() {
 	if path == "" {
 		return
 	}
-	if err := os.WriteFile(path, []byte(editorText()), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(documentText()), 0644); err != nil {
 		return
 	}
 	currentFile = path
@@ -1459,15 +1463,47 @@ func openFile() {
 	if path == "" {
 		return
 	}
+	if err := loadFile(path); err != nil {
+		showFileOpenError(path, err)
+	}
+}
+
+func documentText() string {
+	return strings.ReplaceAll(strings.ReplaceAll(editorText(), "\r\n", "\n"), "\n", lineEnding)
+}
+
+func loadFile(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		return err
+	}
+	content := string(data)
+	ending := "\n"
+	if strings.Contains(content, "\r\n") {
+		ending = "\r\n"
+	}
+	content = strings.ReplaceAll(strings.ReplaceAll(content, "\r\n", "\n"), "\n", "\r\n")
+	encoded, err := syscall.UTF16FromString(content)
+	if err != nil {
+		return fmt.Errorf("the file contains NUL characters and cannot be opened as UTF-8 Markdown")
+	}
+	loaded, _, _ := sendMessageW.Call(editorHwnd, WM_SETTEXT, 0, uintptr(unsafe.Pointer(&encoded[0])))
+	if loaded == 0 {
+		return fmt.Errorf("could not load the document into the editor")
 	}
 	currentFile = path
-	txt := utf16From(string(data))
-	sendMessageW.Call(editorHwnd, WM_SETTEXT, 0, uintptr(unsafe.Pointer(&txt[0])))
+	lineEnding = ending
+	scrollY = 0
+	totalHeight = 0
 	updatePreview()
 	refreshWindowTitle()
+	return nil
+}
+
+func showFileOpenError(path string, err error) {
+	body := utf16From(fmt.Sprintf("Could not open %s\n\n%v", path, err))
+	title := utf16From("TinyMD — Open failed")
+	messageBoxW.Call(mainHwnd, uintptr(unsafe.Pointer(&body[0])), uintptr(unsafe.Pointer(&title[0])), mbOk|mbIconError)
 }
 
 func openInFolder() {
@@ -2048,17 +2084,13 @@ func printFormatted() {
 func main() {
 	runtime.LockOSThread()
 
-	var initialContent string
+	var initialFile string
 	autoPrint := false
 	for _, arg := range os.Args[1:] {
 		if arg == "--print" {
 			autoPrint = true
-		} else if currentFile == "" {
-			currentFile = arg
-			data, err := os.ReadFile(currentFile)
-			if err == nil {
-				initialContent = string(data)
-			}
+		} else if initialFile == "" {
+			initialFile = arg
 		}
 	}
 
@@ -2099,10 +2131,10 @@ func main() {
 	updateWindowProc.Call(mainHwnd)
 
 	// Set initial content
-	if initialContent != "" {
-		txt := utf16From(initialContent)
-		sendMessageW.Call(editorHwnd, WM_SETTEXT, 0, uintptr(unsafe.Pointer(&txt[0])))
-		updatePreview()
+	if initialFile != "" {
+		if err := loadFile(initialFile); err != nil {
+			showFileOpenError(initialFile, err)
+		}
 	}
 
 	setFocus.Call(editorHwnd)
