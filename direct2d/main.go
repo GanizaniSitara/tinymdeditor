@@ -413,6 +413,21 @@ type TableCell struct {
 type TableData struct {
 	Headers []TableCell
 	Rows    [][]TableCell
+	// Aligns holds the per-column alignment from the delimiter row, as a DirectWrite
+	// DWRITE_TEXT_ALIGNMENT value: 0 leading, 1 trailing, 2 centre.
+	Aligns []uint32
+}
+
+// textAlignmentFor maps a Markdown column alignment onto the DirectWrite value.
+func textAlignmentFor(alignment extast.Alignment) uint32 {
+	switch alignment {
+	case extast.AlignRight:
+		return 1 // DWRITE_TEXT_ALIGNMENT_TRAILING
+	case extast.AlignCenter:
+		return 2 // DWRITE_TEXT_ALIGNMENT_CENTER
+	default:
+		return 0 // DWRITE_TEXT_ALIGNMENT_LEADING
+	}
 }
 
 type InlineSpan struct {
@@ -682,6 +697,11 @@ func markdownToLayout(source []byte) []LayoutBlock {
 
 		if n.Kind() == extast.KindTable {
 			td := &TableData{}
+			if table, ok := n.(*extast.Table); ok {
+				for _, alignment := range table.Alignments {
+					td.Aligns = append(td.Aligns, textAlignmentFor(alignment))
+				}
+			}
 			for child := n.FirstChild(); child != nil; child = child.NextSibling() {
 				if child.Kind() == extast.KindTableHeader {
 					for cell := child.FirstChild(); cell != nil; cell = cell.NextSibling() {
@@ -847,6 +867,95 @@ func getBrush(b *LayoutBlock) uintptr {
 	return res.brushText
 }
 
+// fitColumnsToWidth shrinks table columns in place so the table fits the pane.
+// Columns are measured at the width they would like to be; left alone, a table of
+// prose runs off the right edge and the text is clipped. Columns already narrower
+// than an equal share keep their measured width, and the columns over that share
+// divide what is left in proportion to what they asked for, so a one-word column
+// stays narrow and the prose column gives up the space.
+func fitColumnsToWidth(colWidths []float32, available, cellPad float32) {
+	if len(colWidths) == 0 || available <= 0 {
+		return
+	}
+	var total float32
+	for _, w := range colWidths {
+		total += w
+	}
+	if total <= available {
+		return
+	}
+
+	minWidth := cellPad*2 + 24
+	if evenShare := available / float32(len(colWidths)); minWidth > evenShare {
+		minWidth = evenShare
+	}
+
+	settled := make([]bool, len(colWidths))
+	for {
+		var settledWidth, flexibleWidth float32
+		flexible := 0
+		for i, w := range colWidths {
+			if settled[i] {
+				settledWidth += w
+				continue
+			}
+			flexibleWidth += w
+			flexible++
+		}
+		if flexible == 0 {
+			break
+		}
+
+		budget := available - settledWidth
+		if budget <= 0 {
+			for i := range colWidths {
+				if !settled[i] {
+					colWidths[i] = minWidth
+				}
+			}
+			break
+		}
+
+		// Anything under the fair cut is not the problem; leave it be and re-cut
+		// what remains among the columns that are still too wide.
+		share := budget / float32(flexible)
+		narrowed := false
+		for i, w := range colWidths {
+			if !settled[i] && w <= share {
+				settled[i] = true
+				narrowed = true
+			}
+		}
+		if narrowed {
+			continue
+		}
+
+		scale := budget / flexibleWidth
+		for i := range colWidths {
+			if settled[i] {
+				continue
+			}
+			colWidths[i] *= scale
+			if colWidths[i] < minWidth {
+				colWidths[i] = minWidth
+			}
+		}
+		break
+	}
+
+	// Clamping to a minimum can push the total back over; squeeze the excess out.
+	total = 0
+	for _, w := range colWidths {
+		total += w
+	}
+	if total > available {
+		scale := available / total
+		for i := range colWidths {
+			colWidths[i] *= scale
+		}
+	}
+}
+
 func renderPreview(hwnd uintptr) {
 	if res.renderTarget == 0 {
 		if !createDeviceResources(hwnd) {
@@ -955,6 +1064,11 @@ func renderPreview(hwnd uintptr) {
 				}
 			}
 
+			// The measurements above are the width each column would like. Left alone
+			// they run off the right of the pane and the text is clipped, so shrink
+			// the columns that are over their fair share until the table fits.
+			fitColumnsToWidth(colWidths, drawWidth, cellPad)
+
 			// Compute cumulative X offsets for each column
 			colOffsets := make([]float32, numCols+1)
 			colOffsets[0] = 0
@@ -1038,6 +1152,11 @@ func renderPreview(hwnd uintptr) {
 							uintptr(unsafe.Pointer(&cellLayout)),
 						)
 						if cellLayout != 0 {
+							// Honour the column's alignment from the delimiter row.
+							// IDWriteTextFormat::SetTextAlignment is vtable index 3.
+							if ci < len(td.Aligns) && td.Aligns[ci] != 0 {
+								comCall(cellLayout, 3, uintptr(td.Aligns[ci]))
+							}
 							comCall(res.renderTarget, 28,
 								packPoint2F(cellX+cellPad, y+cellPad),
 								cellLayout,

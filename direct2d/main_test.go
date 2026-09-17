@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 	"unsafe"
+
+	extast "github.com/yuin/goldmark/extension/ast"
 )
 
 func TestAbsoluteFilePathRejectsUntitledDocument(t *testing.T) {
@@ -168,5 +170,111 @@ func TestUTF16ClipboardPayloadRoundTripsMultilineMarkdown(t *testing.T) {
 	encoded := utf16From(input)
 	if got := syscall.UTF16ToString(encoded); got != input {
 		t.Fatalf("round trip mismatch: %q", got)
+	}
+}
+
+func totalWidth(colWidths []float32) float32 {
+	var total float32
+	for _, width := range colWidths {
+		total += width
+	}
+	return total
+}
+
+func TestFitColumnsToWidthLeavesTablesThatAlreadyFit(t *testing.T) {
+	colWidths := []float32{100, 150, 80}
+	fitColumnsToWidth(colWidths, 600, 8)
+	for index, want := range []float32{100, 150, 80} {
+		if colWidths[index] != want {
+			t.Fatalf("column %d was resized to %v, expected %v", index, colWidths[index], want)
+		}
+	}
+}
+
+func TestFitColumnsToWidthShrinksTablesThatOverflow(t *testing.T) {
+	// A prose table measured at 1400pt in a 600pt pane: without this it ran off
+	// the right of the preview and the text was clipped.
+	colWidths := []float32{200, 1200}
+	fitColumnsToWidth(colWidths, 600, 8)
+	if got := totalWidth(colWidths); got > 600.5 {
+		t.Fatalf("table still overflows: total %v for an available width of 600", got)
+	}
+}
+
+func TestFitColumnsToWidthKeepsNarrowColumnsNarrow(t *testing.T) {
+	// The wide prose column should give up the space, not the short label column.
+	colWidths := []float32{60, 1200}
+	fitColumnsToWidth(colWidths, 600, 8)
+	if colWidths[0] != 60 {
+		t.Fatalf("narrow column was squeezed to %v, expected it to keep 60", colWidths[0])
+	}
+	if colWidths[1] >= 1200 {
+		t.Fatalf("wide column was not shrunk: %v", colWidths[1])
+	}
+	if got := totalWidth(colWidths); got > 600.5 {
+		t.Fatalf("table still overflows: total %v", got)
+	}
+}
+
+func TestFitColumnsToWidthSharesSpaceBetweenEquallyWideColumns(t *testing.T) {
+	colWidths := []float32{900, 900}
+	fitColumnsToWidth(colWidths, 600, 8)
+	if difference := colWidths[0] - colWidths[1]; difference > 0.5 || difference < -0.5 {
+		t.Fatalf("columns of equal demand were given unequal widths: %v and %v",
+			colWidths[0], colWidths[1])
+	}
+}
+
+func TestFitColumnsToWidthSurvivesAVeryNarrowPane(t *testing.T) {
+	// Dragging the splitter almost shut must not produce zero or negative widths.
+	colWidths := []float32{300, 300, 300, 300}
+	fitColumnsToWidth(colWidths, 40, 8)
+	if got := totalWidth(colWidths); got > 40.5 {
+		t.Fatalf("table overflows a 40pt pane: total %v", got)
+	}
+	for index, width := range colWidths {
+		if width <= 0 {
+			t.Fatalf("column %d collapsed to %v", index, width)
+		}
+	}
+}
+
+func TestFitColumnsToWidthIgnoresAnEmptyTable(t *testing.T) {
+	fitColumnsToWidth(nil, 600, 8)       // must not panic
+	fitColumnsToWidth([]float32{}, 0, 8) // nor with no width to give
+}
+
+func TestTextAlignmentForMapsMarkdownAlignment(t *testing.T) {
+	for _, testCase := range []struct {
+		alignment extast.Alignment
+		want      uint32
+	}{
+		{extast.AlignLeft, 0},
+		{extast.AlignRight, 1},
+		{extast.AlignCenter, 2},
+		{extast.AlignNone, 0},
+	} {
+		if got := textAlignmentFor(testCase.alignment); got != testCase.want {
+			t.Fatalf("alignment %v mapped to %d, expected %d", testCase.alignment, got, testCase.want)
+		}
+	}
+}
+
+func TestTableLayoutCapturesColumnAlignment(t *testing.T) {
+	blocks := markdownToLayout([]byte("| Left | Centre | Right |\n|:-----|:------:|------:|\n| a | b | c |\n"))
+	var table *TableData
+	for index := range blocks {
+		if blocks[index].Type == blockTable {
+			table = blocks[index].Table
+			break
+		}
+	}
+	if table == nil {
+		t.Fatal("no table block was produced")
+	}
+	for index, want := range []uint32{0, 2, 1} {
+		if table.Aligns[index] != want {
+			t.Fatalf("column %d alignment %d, expected %d", index, table.Aligns[index], want)
+		}
 	}
 }
