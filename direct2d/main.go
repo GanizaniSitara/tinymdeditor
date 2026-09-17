@@ -58,6 +58,11 @@ var (
 	setScrollInfo        = user32.NewProc("SetScrollInfo")
 	getKeyState          = user32.NewProc("GetKeyState")
 	destroyWindowProc    = user32.NewProc("DestroyWindow")
+	setCapture           = user32.NewProc("SetCapture")
+	releaseCapture       = user32.NewProc("ReleaseCapture")
+	setCursorProc        = user32.NewProc("SetCursor")
+	getCursorPos         = user32.NewProc("GetCursorPos")
+	screenToClient       = user32.NewProc("ScreenToClient")
 	createMenu           = user32.NewProc("CreateMenu")
 	createPopupMenu      = user32.NewProc("CreatePopupMenu")
 	appendMenuW          = user32.NewProc("AppendMenuW")
@@ -141,15 +146,27 @@ const (
 	WM_TIMER      = 0x0113
 	WM_KEYDOWN    = 0x0100
 	WM_MOUSEWHEEL = 0x020A
-	WM_VSCROLL    = 0x0115
-	WM_SETFONT    = 0x0030
-	WM_SETFOCUS   = 0x0007
-	WM_ERASEBKGND = 0x0014
-	WM_SETTEXT    = 0x000C
-	WM_CUT        = 0x0300
-	WM_COPY       = 0x0301
-	WM_PASTE      = 0x0302
-	WM_UNDO       = 0x0304
+
+	WM_SETCURSOR      = 0x0020
+	WM_MOUSEMOVE      = 0x0200
+	WM_LBUTTONDOWN    = 0x0201
+	WM_LBUTTONUP      = 0x0202
+	WM_LBUTTONDBLCLK  = 0x0203
+	WM_CAPTURECHANGED = 0x0215
+	HTCLIENT          = 1
+	IDC_SIZEWE        = 32644
+	CS_DBLCLKS        = 0x0008
+	SW_HIDE           = 0
+	SW_SHOWNOACTIVATE = 4
+	WM_VSCROLL        = 0x0115
+	WM_SETFONT        = 0x0030
+	WM_SETFOCUS       = 0x0007
+	WM_ERASEBKGND     = 0x0014
+	WM_SETTEXT        = 0x000C
+	WM_CUT            = 0x0300
+	WM_COPY           = 0x0301
+	WM_PASTE          = 0x0302
+	WM_UNDO           = 0x0304
 
 	EN_CHANGE  = 0x0300
 	VK_A       = 0x41
@@ -160,6 +177,9 @@ const (
 	VK_P       = 0x50
 	VK_O       = 0x4F
 	VK_E       = 0x45
+	VK_0       = 0x30
+	VK_1       = 0x31
+	VK_2       = 0x32
 	VK_SHIFT   = 0x10
 	VK_CONTROL = 0x11
 
@@ -187,6 +207,9 @@ const (
 	idEditCopy     = 1103
 	idEditPaste    = 1104
 	idEditAll      = 1105
+	idViewEditor   = 1301
+	idViewPreview  = 1302
+	idViewSplit    = 1303
 	idHelpAbout    = 1201
 
 	SB_VERT          = 1
@@ -269,6 +292,7 @@ func installMainMenu(hwnd uintptr) {
 	menu, _, _ := createMenu.Call()
 	fileMenu, _, _ := createPopupMenu.Call()
 	editMenu, _, _ := createPopupMenu.Call()
+	viewMenu, _, _ := createPopupMenu.Call()
 	helpMenu, _, _ := createPopupMenu.Call()
 
 	appendMenu(fileMenu, mfString, idFileOpen, "&Open...\tCtrl+O")
@@ -289,10 +313,15 @@ func installMainMenu(hwnd uintptr) {
 	appendMenu(editMenu, mfSeparator, 0, "")
 	appendMenu(editMenu, mfString, idEditAll, "Select &All\tCtrl+A")
 
+	appendMenu(viewMenu, mfString, idViewEditor, "&Editor only\tCtrl+1")
+	appendMenu(viewMenu, mfString, idViewPreview, "&Preview only\tCtrl+2")
+	appendMenu(viewMenu, mfString, idViewSplit, "&Split evenly\tCtrl+0")
+
 	appendMenu(helpMenu, mfString, idHelpAbout, "&About TinyMD")
 
 	appendMenu(menu, mfPopup, fileMenu, "&File")
 	appendMenu(menu, mfPopup, editMenu, "&Edit")
+	appendMenu(menu, mfPopup, viewMenu, "&View")
 	appendMenu(menu, mfPopup, helpMenu, "&Help")
 	setMenu.Call(hwnd, menu)
 	drawMenuBar.Call(hwnd)
@@ -336,6 +365,12 @@ func handleMenuCommand(id uintptr) bool {
 		updatePreview()
 	case idEditAll:
 		sendMessageW.Call(editorHwnd, EM_SETSEL, 0, ^uintptr(0))
+	case idViewEditor:
+		toggleCollapse(false) // collapse the preview, or bring it back
+	case idViewPreview:
+		toggleCollapse(true) // collapse the editor, or bring it back
+	case idViewSplit:
+		setSplitRatio(0.5)
 	case idHelpAbout:
 		showAboutDialog()
 	default:
@@ -956,6 +991,140 @@ func fitColumnsToWidth(colWidths []float32, available, cellPad float32) {
 	}
 }
 
+// Splitter state. splitRatio is the share of the window given to the editor: 0
+// collapses the editor, 1 collapses the preview. restoreSplitRatio remembers where
+// the splitter was before a collapse so the pane can be brought back where it was.
+var (
+	splitRatio        = 0.5
+	restoreSplitRatio = 0.5
+	splitDragging     bool
+)
+
+const dividerWidth = int32(6)
+
+// paneGeometry works out where the two panes and the divider sit for a given split.
+// It is pure so the collapse and clamping rules can be tested without a window.
+func paneGeometry(width, height int32, ratio float64) (editorW, dividerX, previewX, previewW int32) {
+	if width <= 0 {
+		return 0, 0, 0, 0
+	}
+	if ratio <= 0 {
+		// Editor collapsed: the preview takes everything.
+		return 0, 0, 0, width
+	}
+	if ratio >= 1 {
+		// Preview collapsed: the editor takes everything.
+		return width, width, width, 0
+	}
+
+	editorW = int32(float64(width) * ratio)
+	// Keep the divider on screen even at the extremes of a drag.
+	if editorW > width-dividerWidth {
+		editorW = width - dividerWidth
+	}
+	if editorW < 0 {
+		editorW = 0
+	}
+	dividerX = editorW
+	previewX = editorW + dividerWidth
+	previewW = width - previewX
+	if previewW < 0 {
+		previewW = 0
+	}
+	return editorW, dividerX, previewX, previewW
+}
+
+// splitRatioAt converts a mouse position into a split ratio, snapping to a full
+// collapse near either edge so the panes can be closed by dragging.
+func splitRatioAt(x, width int32) float64 {
+	if width <= 0 {
+		return splitRatio
+	}
+	const snap = int32(24)
+	if x <= snap {
+		return 0
+	}
+	if x >= width-snap {
+		return 1
+	}
+	return float64(x) / float64(width)
+}
+
+// setSplitRatio applies a new split and re-lays out the panes.
+func setSplitRatio(ratio float64) {
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	splitRatio = ratio
+	if ratio > 0 && ratio < 1 {
+		restoreSplitRatio = ratio
+	}
+	layoutPanes()
+}
+
+// toggleCollapse collapses the named pane, or restores the previous split if that
+// pane is already collapsed, so the same command works both ways.
+func toggleCollapse(collapseEditor bool) {
+	target := 1.0 // preview collapsed
+	if collapseEditor {
+		target = 0
+	}
+	if splitRatio == target {
+		restore := restoreSplitRatio
+		if restore <= 0 || restore >= 1 {
+			restore = 0.5
+		}
+		setSplitRatio(restore)
+		return
+	}
+	setSplitRatio(target)
+}
+
+// layoutPanes positions the editor, the preview and the divider for the current split.
+func layoutPanes() {
+	if mainHwnd == 0 {
+		return
+	}
+	var rc [16]byte
+	getClientRect.Call(mainHwnd, uintptr(unsafe.Pointer(&rc[0])))
+	width := *(*int32)(unsafe.Pointer(&rc[8]))
+	height := *(*int32)(unsafe.Pointer(&rc[12]))
+
+	editorW, _, previewX, previewW := paneGeometry(width, height, splitRatio)
+
+	// A hidden window is cheaper than a zero-width one, and Direct2D will not make a
+	// render target for a zero-sized client area.
+	if editorW <= 0 {
+		showWindowProc.Call(editorHwnd, SW_HIDE)
+	} else {
+		moveWindow.Call(editorHwnd, 0, 0, uintptr(editorW), uintptr(height), 1)
+		showWindowProc.Call(editorHwnd, SW_SHOWNOACTIVATE)
+	}
+	if previewW <= 0 {
+		showWindowProc.Call(previewHwnd, SW_HIDE)
+	} else {
+		moveWindow.Call(previewHwnd, uintptr(previewX), 0, uintptr(previewW), uintptr(height), 1)
+		showWindowProc.Call(previewHwnd, SW_SHOWNOACTIVATE)
+	}
+	invalidateRect.Call(mainHwnd, 0, 1)
+}
+
+// overDivider reports whether a client x coordinate falls on the splitter.
+func overDivider(x, width int32) bool {
+	_, dividerX, previewX, _ := paneGeometry(width, 0, splitRatio)
+	if splitRatio <= 0 {
+		// Collapsed editor: leave a grab strip at the very left edge.
+		return x < dividerWidth
+	}
+	if splitRatio >= 1 {
+		return x > width-dividerWidth
+	}
+	return x >= dividerX && x < previewX
+}
+
 func renderPreview(hwnd uintptr) {
 	if res.renderTarget == 0 {
 		if !createDeviceResources(hwnd) {
@@ -1399,14 +1568,61 @@ func mainWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		return 0
 
 	case WM_SIZE:
-		w := int32(loword(lParam))
-		h := int32(hiword(lParam))
-		half := w / 2
-		divider := int32(6)
-		moveWindow.Call(editorHwnd, 0, 0, uintptr(half-divider/2), uintptr(h), 1)
-		moveWindow.Call(previewHwnd, uintptr(half+divider/2), 0, uintptr(w-half-divider/2), uintptr(h), 1)
-
+		layoutPanes()
 		return 0
+
+	case WM_SETCURSOR:
+		// Only the client area, and only while the pointer is over the splitter.
+		if loword(lParam) == HTCLIENT {
+			var pt [8]byte
+			getCursorPos.Call(uintptr(unsafe.Pointer(&pt[0])))
+			screenToClient.Call(hwnd, uintptr(unsafe.Pointer(&pt[0])))
+			x := *(*int32)(unsafe.Pointer(&pt[0]))
+			var rc [16]byte
+			getClientRect.Call(hwnd, uintptr(unsafe.Pointer(&rc[0])))
+			if splitDragging || overDivider(x, *(*int32)(unsafe.Pointer(&rc[8]))) {
+				cursor, _, _ := loadCursorW.Call(0, IDC_SIZEWE)
+				setCursorProc.Call(cursor)
+				return 1
+			}
+		}
+
+	case WM_LBUTTONDOWN:
+		var rc [16]byte
+		getClientRect.Call(hwnd, uintptr(unsafe.Pointer(&rc[0])))
+		if overDivider(int32(int16(loword(lParam))), *(*int32)(unsafe.Pointer(&rc[8]))) {
+			splitDragging = true
+			setCapture.Call(hwnd)
+			return 0
+		}
+
+	case WM_MOUSEMOVE:
+		if splitDragging {
+			var rc [16]byte
+			getClientRect.Call(hwnd, uintptr(unsafe.Pointer(&rc[0])))
+			setSplitRatio(splitRatioAt(int32(int16(loword(lParam))), *(*int32)(unsafe.Pointer(&rc[8]))))
+			return 0
+		}
+
+	case WM_LBUTTONUP:
+		if splitDragging {
+			splitDragging = false
+			releaseCapture.Call()
+			return 0
+		}
+
+	case WM_CAPTURECHANGED:
+		splitDragging = false
+
+	case WM_LBUTTONDBLCLK:
+		// Double-clicking the splitter restores an even split, which is the quickest
+		// way back from either collapsed state.
+		var rc [16]byte
+		getClientRect.Call(hwnd, uintptr(unsafe.Pointer(&rc[0])))
+		if overDivider(int32(int16(loword(lParam))), *(*int32)(unsafe.Pointer(&rc[8]))) {
+			setSplitRatio(0.5)
+			return 0
+		}
 
 	case WM_COMMAND:
 		if hiword(wParam) == EN_CHANGE && loword(wParam) == 1 {
@@ -1780,6 +1996,12 @@ func handleShortcut(wParam uintptr) bool {
 		openInFolder()
 	case wParam == VK_P:
 		printFormatted()
+	case wParam == VK_1:
+		toggleCollapse(false)
+	case wParam == VK_2:
+		toggleCollapse(true)
+	case wParam == VK_0:
+		setSplitRatio(0.5)
 	default:
 		return false
 	}
@@ -2221,10 +2443,13 @@ func main() {
 
 	var wc [80]byte
 	*(*uint32)(unsafe.Pointer(&wc[0])) = 80
+	*(*uint32)(unsafe.Pointer(&wc[4])) = CS_DBLCLKS // so the splitter can be double-clicked
 	*(*uintptr)(unsafe.Pointer(&wc[8])) = syscall.NewCallback(mainWndProc)
 	*(*uintptr)(unsafe.Pointer(&wc[24])) = hInstance
 	*(*uintptr)(unsafe.Pointer(&wc[40])) = cursor
-	*(*uintptr)(unsafe.Pointer(&wc[48])) = 6 // COLOR_WINDOW+1
+	// The panes cover the whole client area except the splitter strip, so the class
+	// background is what draws the splitter. COLOR_BTNFACE reads as a divider.
+	*(*uintptr)(unsafe.Pointer(&wc[48])) = 16 // COLOR_BTNFACE+1
 	*(*uintptr)(unsafe.Pointer(&wc[64])) = uintptr(unsafe.Pointer(&className[0]))
 	registerClassExW.Call(uintptr(unsafe.Pointer(&wc[0])))
 
