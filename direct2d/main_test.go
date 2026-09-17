@@ -278,3 +278,118 @@ func TestTableLayoutCapturesColumnAlignment(t *testing.T) {
 		}
 	}
 }
+
+func TestPaneGeometrySplitsEvenly(t *testing.T) {
+	editorW, dividerX, previewX, previewW := paneGeometry(1000, 800, 0.5)
+	if editorW != 500 || dividerX != 500 || previewX != 500+dividerWidth {
+		t.Fatalf("even split placed panes at editor=%d divider=%d preview=%d",
+			editorW, dividerX, previewX)
+	}
+	if editorW+dividerWidth+previewW != 1000 {
+		t.Fatalf("panes and divider do not fill the window: %d + %d + %d",
+			editorW, dividerWidth, previewW)
+	}
+}
+
+func TestPaneGeometryCollapsesTheEditor(t *testing.T) {
+	editorW, _, previewX, previewW := paneGeometry(1000, 800, 0)
+	if editorW != 0 || previewX != 0 || previewW != 1000 {
+		t.Fatalf("collapsing the editor left editor=%d preview=%d wide at x=%d",
+			editorW, previewW, previewX)
+	}
+}
+
+func TestPaneGeometryCollapsesThePreview(t *testing.T) {
+	editorW, _, _, previewW := paneGeometry(1000, 800, 1)
+	if editorW != 1000 || previewW != 0 {
+		t.Fatalf("collapsing the preview left editor=%d preview=%d", editorW, previewW)
+	}
+}
+
+func TestPaneGeometryKeepsTheDividerReachable(t *testing.T) {
+	// A drag to the far edge must not push the splitter out of the window, or it
+	// could never be grabbed again.
+	editorW, dividerX, _, _ := paneGeometry(1000, 800, 0.999)
+	if dividerX > 1000-dividerWidth {
+		t.Fatalf("divider at %d is off the right edge of a 1000pt window", dividerX)
+	}
+	if editorW < 0 {
+		t.Fatalf("negative editor width %d", editorW)
+	}
+}
+
+func TestPaneGeometryHandlesAZeroWidthWindow(t *testing.T) {
+	editorW, _, _, previewW := paneGeometry(0, 0, 0.5) // minimised
+	if editorW != 0 || previewW != 0 {
+		t.Fatalf("zero width window produced editor=%d preview=%d", editorW, previewW)
+	}
+}
+
+func TestSplitRatioAtSnapsToACollapseNearTheEdges(t *testing.T) {
+	if got := splitRatioAt(4, 1000); got != 0 {
+		t.Fatalf("dragging to the left edge gave %v, expected a collapsed editor", got)
+	}
+	if got := splitRatioAt(996, 1000); got != 1 {
+		t.Fatalf("dragging to the right edge gave %v, expected a collapsed preview", got)
+	}
+	if got := splitRatioAt(500, 1000); got != 0.5 {
+		t.Fatalf("dragging to the middle gave %v, expected 0.5", got)
+	}
+}
+
+func TestToggleCollapseRestoresThePreviousSplit(t *testing.T) {
+	defer func() { splitRatio, restoreSplitRatio = 0.5, 0.5 }()
+
+	setSplitRatio(0.7)
+	toggleCollapse(true) // collapse the editor
+	if splitRatio != 0 {
+		t.Fatalf("editor did not collapse: ratio %v", splitRatio)
+	}
+	toggleCollapse(true) // same command again brings it back
+	if splitRatio != 0.7 {
+		t.Fatalf("restoring gave %v, expected the previous 0.7", splitRatio)
+	}
+
+	toggleCollapse(false) // collapse the preview
+	if splitRatio != 1 {
+		t.Fatalf("preview did not collapse: ratio %v", splitRatio)
+	}
+	toggleCollapse(false)
+	if splitRatio != 0.7 {
+		t.Fatalf("restoring gave %v, expected the previous 0.7", splitRatio)
+	}
+}
+
+func TestSetSplitRatioClampsOutOfRangeValues(t *testing.T) {
+	defer func() { splitRatio, restoreSplitRatio = 0.5, 0.5 }()
+	setSplitRatio(-2)
+	if splitRatio != 0 {
+		t.Fatalf("negative ratio became %v", splitRatio)
+	}
+	setSplitRatio(4)
+	if splitRatio != 1 {
+		t.Fatalf("oversized ratio became %v", splitRatio)
+	}
+}
+
+func TestOverDividerFindsTheGrabStrip(t *testing.T) {
+	defer func() { splitRatio, restoreSplitRatio = 0.5, 0.5 }()
+
+	splitRatio = 0.5
+	if !overDivider(502, 1000) {
+		t.Fatal("the splitter was not grabbable at its own position")
+	}
+	if overDivider(200, 1000) || overDivider(800, 1000) {
+		t.Fatal("clicking inside a pane was treated as grabbing the splitter")
+	}
+
+	// Collapsed panes still need a strip to drag back out.
+	splitRatio = 0
+	if !overDivider(2, 1000) {
+		t.Fatal("a collapsed editor left no grab strip at the left edge")
+	}
+	splitRatio = 1
+	if !overDivider(998, 1000) {
+		t.Fatal("a collapsed preview left no grab strip at the right edge")
+	}
+}
