@@ -18,7 +18,7 @@ func TestAbsoluteFilePathRejectsUntitledDocument(t *testing.T) {
 	}
 }
 
-func setupPreviewTest(test *testing.T) {
+func setupPreviewTest(test testing.TB) {
 	test.Helper()
 	runtime.LockOSThread()
 	test.Cleanup(runtime.UnlockOSThread)
@@ -391,5 +391,89 @@ func TestOverDividerFindsTheGrabStrip(t *testing.T) {
 	splitRatio = 1
 	if !overDivider(998, 1000) {
 		t.Fatal("a collapsed preview left no grab strip at the right edge")
+	}
+}
+
+func TestRepaintReusesTextLayouts(test *testing.T) {
+	setupPreviewTest(test)
+	encoded := utf16From("# Heading\r\n\r\nParagraph one.\r\n\r\nParagraph two.\r\n")
+	sendMessageW.Call(editorHwnd, WM_SETTEXT, 0, uintptr(unsafe.Pointer(&encoded[0])))
+	updatePreview()
+
+	renderPreview(previewHwnd)
+	first := make([]uintptr, len(currentBlocks))
+	for i := range currentBlocks {
+		if currentBlocks[i].layout == 0 {
+			test.Fatalf("block %d was drawn without a layout", i)
+		}
+		first[i] = currentBlocks[i].layout
+	}
+
+	renderPreview(previewHwnd)
+	for i := range currentBlocks {
+		if currentBlocks[i].layout != first[i] {
+			test.Fatalf("block %d rebuilt its layout on a repaint: %d then %d",
+				i, first[i], currentBlocks[i].layout)
+		}
+	}
+}
+
+func TestChangingPaneWidthRebuildsLayouts(test *testing.T) {
+	setupPreviewTest(test)
+	encoded := utf16From("Paragraph long enough that its wrapped height depends on the pane width.\r\n")
+	sendMessageW.Call(editorHwnd, WM_SETTEXT, 0, uintptr(unsafe.Pointer(&encoded[0])))
+	updatePreview()
+	renderPreview(previewHwnd)
+	wideWidth := currentBlocks[0].layoutWidth
+
+	moveWindow.Call(previewHwnd, 0, 0, 300, 800, 1)
+	discardDeviceResources()
+	renderPreview(previewHwnd)
+
+	if currentBlocks[0].layoutWidth == wideWidth {
+		test.Fatalf("narrowing the pane did not re-measure the text: still %v", wideWidth)
+	}
+}
+
+func TestUpdatePreviewReleasesTheOldLayouts(test *testing.T) {
+	setupPreviewTest(test)
+	for _, content := range []string{"First document.\r\n", "Second document, different text.\r\n"} {
+		encoded := utf16From(content)
+		sendMessageW.Call(editorHwnd, WM_SETTEXT, 0, uintptr(unsafe.Pointer(&encoded[0])))
+		updatePreview()
+		if len(currentBlocks) == 0 {
+			test.Fatal("document produced no blocks")
+		}
+		if currentBlocks[0].layout != 0 {
+			test.Fatal("a fresh block arrived with a layout already attached")
+		}
+		renderPreview(previewHwnd)
+	}
+}
+
+func TestTableIsMeasuredOncePerPaneWidth(test *testing.T) {
+	setupPreviewTest(test)
+	encoded := utf16From("| Column | Drives |\r\n| --- | --- |\r\n| a | a sentence that wraps |\r\n")
+	sendMessageW.Call(editorHwnd, WM_SETTEXT, 0, uintptr(unsafe.Pointer(&encoded[0])))
+	updatePreview()
+
+	renderPreview(previewHwnd)
+	var table *TableData
+	for i := range currentBlocks {
+		if currentBlocks[i].Type == blockTable {
+			table = currentBlocks[i].Table
+		}
+	}
+	if table == nil || table.cached == nil {
+		test.Fatal("the table was drawn without being measured")
+	}
+	measured := table.cached
+	if len(measured.rows) != 2 {
+		test.Fatalf("expected a header and one body row, got %d", len(measured.rows))
+	}
+
+	renderPreview(previewHwnd)
+	if table.cached != measured {
+		test.Fatal("the table was re-measured on a repaint")
 	}
 }

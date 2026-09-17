@@ -451,6 +451,10 @@ type TableData struct {
 	// Aligns holds the per-column alignment from the delimiter row, as a DirectWrite
 	// DWRITE_TEXT_ALIGNMENT value: 0 leading, 1 trailing, 2 centre.
 	Aligns []uint32
+
+	// cached holds the table measured for one pane width, so repaints and scrolling
+	// do not re-measure every cell.
+	cached *tableGeometry
 }
 
 // textAlignmentFor maps a Markdown column alignment onto the DirectWrite value.
@@ -487,6 +491,32 @@ type LayoutBlock struct {
 	Spans      []InlineSpan
 	Y          float32 // computed during layout
 	Height     float32 // measured height
+
+	// A block's text layout only changes when the text or the pane width changes,
+	// so it is built once and kept. Rebuilding every block on every repaint made
+	// scrolling and typing cost tens of milliseconds on a document of any size.
+	layout      uintptr
+	layoutWidth float32
+}
+
+// releaseLayout drops a block's cached text layout, and a table's measured cells.
+func (b *LayoutBlock) releaseLayout() {
+	if b.layout != 0 {
+		comRelease(b.layout)
+		b.layout = 0
+		b.layoutWidth = 0
+	}
+	if b.Table != nil && b.Table.cached != nil {
+		b.Table.cached.release()
+		b.Table.cached = nil
+	}
+}
+
+// releaseBlockLayouts drops every cached layout, for when the document is replaced.
+func releaseBlockLayouts(blocks []LayoutBlock) {
+	for i := range blocks {
+		blocks[i].releaseLayout()
+	}
 }
 
 // D2D resources (created when render target exists)
@@ -604,6 +634,10 @@ func createDeviceResources(hwnd uintptr) bool {
 	*(*uintptr)(unsafe.Pointer(&hwndProps[0])) = hwnd
 	*(*uint32)(unsafe.Pointer(&hwndProps[8])) = uint32(w)
 	*(*uint32)(unsafe.Pointer(&hwndProps[12])) = uint32(h)
+	// D2D1_PRESENT_OPTIONS_IMMEDIATELY. Without it EndDraw waits for the display's
+	// next vertical blank, which put a fixed ~25ms on every repaint whatever the
+	// document contained, and that wait is what made typing and scrolling feel slow.
+	*(*uint32)(unsafe.Pointer(&hwndProps[16])) = 2
 
 	// ID2D1Factory::CreateHwndRenderTarget is vtable index 14
 	hr := comCall(res.factory, 14,
@@ -991,6 +1025,146 @@ func fitColumnsToWidth(colWidths []float32, available, cellPad float32) {
 	}
 }
 
+const tableCellPad = float32(8)
+
+// tableGeometry is a table measured for one pane width: the column positions and,
+// for each row, its height and a text layout per cell. Measuring a table means
+// creating a layout for every cell, so it is done once per width rather than on
+// every repaint.
+type tableGeometry struct {
+	width      float32 // the drawWidth it was measured for
+	colWidths  []float32
+	colOffsets []float32
+	tableWidth float32
+	rows       []tableRowGeometry
+}
+
+type tableRowGeometry struct {
+	height float32
+	cells  []uintptr // cached text layouts, one per column
+}
+
+func (g *tableGeometry) release() {
+	for _, row := range g.rows {
+		for _, layout := range row.cells {
+			comRelease(layout)
+		}
+	}
+	g.rows = nil
+}
+
+// cellLayout builds the text layout for one cell at a given width.
+func cellLayout(cell TableCell, width float32, align uint32) uintptr {
+	text := utf16From(cell.Text)
+	length := uint32(len(text) - 1)
+	if length == 0 {
+		text = utf16From(" ")
+		length = 1
+	}
+	format := res.fmtBody
+	if cell.Bold {
+		format = res.fmtH3
+	}
+	var layout uintptr
+	// IDWriteFactory::CreateTextLayout is vtable index 18
+	comCall(res.dwFactory, 18,
+		uintptr(unsafe.Pointer(&text[0])),
+		uintptr(length),
+		format,
+		floatBits(width),
+		floatBits(10000),
+		uintptr(unsafe.Pointer(&layout)),
+	)
+	if layout != 0 && align != 0 {
+		// IDWriteTextFormat::SetTextAlignment is vtable index 3
+		comCall(layout, 3, uintptr(align))
+	}
+	return layout
+}
+
+// layoutHeight reads the measured height of a text layout.
+func layoutHeight(layout uintptr) float32 {
+	if layout == 0 {
+		return 0
+	}
+	var metrics [36]byte
+	comCall(layout, 60, uintptr(unsafe.Pointer(&metrics[0])))
+	return *(*float32)(unsafe.Pointer(&metrics[16]))
+}
+
+// layoutWidthOf reads the measured width of a text layout, trailing whitespace included.
+func layoutWidthOf(layout uintptr) float32 {
+	if layout == 0 {
+		return 0
+	}
+	var metrics [36]byte
+	comCall(layout, 60, uintptr(unsafe.Pointer(&metrics[0])))
+	return *(*float32)(unsafe.Pointer(&metrics[12]))
+}
+
+// geometry returns the table measured for the given pane width, reusing the previous
+// measurement when the width has not changed.
+func (td *TableData) geometry(drawWidth float32) *tableGeometry {
+	if td.cached != nil && td.cached.width == drawWidth {
+		return td.cached
+	}
+	if td.cached != nil {
+		td.cached.release()
+	}
+
+	numCols := len(td.Headers)
+	rows := make([][]TableCell, 0, len(td.Rows)+1)
+	rows = append(rows, td.Headers)
+	rows = append(rows, td.Rows...)
+
+	// What each column would like to be, measured unconstrained.
+	colWidths := make([]float32, numCols)
+	for _, cells := range rows {
+		for ci := 0; ci < numCols && ci < len(cells); ci++ {
+			measure := cellLayout(cells[ci], 10000, 0)
+			if measure == 0 {
+				continue
+			}
+			if want := layoutWidthOf(measure) + tableCellPad*2; want > colWidths[ci] {
+				colWidths[ci] = want
+			}
+			comRelease(measure)
+		}
+	}
+	fitColumnsToWidth(colWidths, drawWidth, tableCellPad)
+
+	colOffsets := make([]float32, numCols+1)
+	for ci := 0; ci < numCols; ci++ {
+		colOffsets[ci+1] = colOffsets[ci] + colWidths[ci]
+	}
+
+	geometry := &tableGeometry{
+		width:      drawWidth,
+		colWidths:  colWidths,
+		colOffsets: colOffsets,
+		tableWidth: colOffsets[numCols],
+	}
+	for _, cells := range rows {
+		row := tableRowGeometry{cells: make([]uintptr, numCols)}
+		for ci := 0; ci < numCols && ci < len(cells); ci++ {
+			var align uint32
+			if ci < len(td.Aligns) {
+				align = td.Aligns[ci]
+			}
+			layout := cellLayout(cells[ci], colWidths[ci]-tableCellPad*2, align)
+			row.cells[ci] = layout
+			if height := layoutHeight(layout); height > row.height {
+				row.height = height
+			}
+		}
+		row.height += tableCellPad * 2
+		geometry.rows = append(geometry.rows, row)
+	}
+
+	td.cached = geometry
+	return geometry
+}
+
 // Splitter state. splitRatio is the share of the window given to the editor: 0
 // collapses the editor, 1 collapses the preview. restoreSplitRatio remembers where
 // the splitter was before a collapse so the pane can be brought back where it was.
@@ -1177,168 +1351,40 @@ func renderPreview(hwnd uintptr) {
 
 		if b.Type == blockTable && b.Table != nil {
 			td := b.Table
-			numCols := len(td.Headers)
-			if numCols == 0 {
+			if len(td.Headers) == 0 {
 				continue
 			}
-			cellPad := float32(8)
+			geometry := td.geometry(drawWidth)
 
-			// Collect all rows: header row first, then data rows
-			type tableRow struct {
-				cells  []TableCell
-				isHead bool
-			}
-			var allRows []tableRow
-			allRows = append(allRows, tableRow{cells: td.Headers, isHead: true})
-			for _, r := range td.Rows {
-				allRows = append(allRows, tableRow{cells: r, isHead: false})
-			}
-
-			// Measure the widest text in each column to auto-size columns
-			colWidths := make([]float32, numCols)
-			for _, row := range allRows {
-				for ci := 0; ci < numCols && ci < len(row.cells); ci++ {
-					cell := row.cells[ci]
-					cellTextU := utf16From(cell.Text)
-					cellTextLen := uint32(len(cellTextU) - 1)
-					if cellTextLen == 0 {
-						cellTextU = utf16From(" ")
-						cellTextLen = 1
-					}
-					var cellFmt uintptr
-					if cell.Bold {
-						cellFmt = res.fmtH3
-					} else {
-						cellFmt = res.fmtBody
-					}
-					var cellLayout uintptr
-					comCall(res.dwFactory, 18,
-						uintptr(unsafe.Pointer(&cellTextU[0])),
-						uintptr(cellTextLen),
-						cellFmt,
-						floatBits(10000), // unconstrained width for measurement
-						floatBits(10000),
-						uintptr(unsafe.Pointer(&cellLayout)),
-					)
-					if cellLayout != 0 {
-						var m [36]byte
-						comCall(cellLayout, 60, uintptr(unsafe.Pointer(&m[0])))
-						// DWRITE_TEXT_METRICS: left(0), top(4), width(8), widthIncludingTrailingWhitespace(12), height(16)
-						cw := *(*float32)(unsafe.Pointer(&m[12])) // widthIncludingTrailingWhitespace
-						if cw+cellPad*2 > colWidths[ci] {
-							colWidths[ci] = cw + cellPad*2
-						}
-						comRelease(cellLayout)
-					}
-				}
-			}
-
-			// The measurements above are the width each column would like. Left alone
-			// they run off the right of the pane and the text is clipped, so shrink
-			// the columns that are over their fair share until the table fits.
-			fitColumnsToWidth(colWidths, drawWidth, cellPad)
-
-			// Compute cumulative X offsets for each column
-			colOffsets := make([]float32, numCols+1)
-			colOffsets[0] = 0
-			for ci := 0; ci < numCols; ci++ {
-				colOffsets[ci+1] = colOffsets[ci] + colWidths[ci]
-			}
-			tableWidth := colOffsets[numCols]
-
-			for _, row := range allRows {
-				// Measure tallest cell in this row
-				var rowHeight float32
-				for ci := 0; ci < numCols && ci < len(row.cells); ci++ {
-					cell := row.cells[ci]
-					cellTextU := utf16From(cell.Text)
-					cellTextLen := uint32(len(cellTextU) - 1)
-					if cellTextLen == 0 {
-						cellTextU = utf16From(" ")
-						cellTextLen = 1
-					}
-					var cellFmt uintptr
-					if cell.Bold {
-						cellFmt = res.fmtH3
-					} else {
-						cellFmt = res.fmtBody
-					}
-					var cellLayout uintptr
-					comCall(res.dwFactory, 18,
-						uintptr(unsafe.Pointer(&cellTextU[0])),
-						uintptr(cellTextLen),
-						cellFmt,
-						floatBits(colWidths[ci]-cellPad*2),
-						floatBits(10000),
-						uintptr(unsafe.Pointer(&cellLayout)),
-					)
-					if cellLayout != 0 {
-						var m [36]byte
-						comCall(cellLayout, 60, uintptr(unsafe.Pointer(&m[0])))
-						ch := *(*float32)(unsafe.Pointer(&m[16]))
-						if ch > rowHeight {
-							rowHeight = ch
-						}
-						comRelease(cellLayout)
-					}
-				}
-				fullRowH := rowHeight + cellPad*2
-
+			for ri, row := range geometry.rows {
+				fullRowH := row.height
 				// Only draw if visible
 				if y-scrollY+fullRowH >= 0 && y-scrollY < clientH {
 					// Header row background
-					if row.isHead {
-						bgRect := [4]float32{padding, y, padding + tableWidth, y + fullRowH}
+					if ri == 0 {
+						bgRect := [4]float32{padding, y, padding + geometry.tableWidth, y + fullRowH}
 						comCall(res.renderTarget, 17,
 							uintptr(unsafe.Pointer(&bgRect[0])),
 							res.brushCodeBg,
 						)
 					}
 
-					// Draw each cell text
-					for ci := 0; ci < numCols && ci < len(row.cells); ci++ {
-						cell := row.cells[ci]
-						cellX := padding + colOffsets[ci]
-						cellTextU := utf16From(cell.Text)
-						cellTextLen := uint32(len(cellTextU) - 1)
-						if cellTextLen == 0 {
-							cellTextU = utf16From(" ")
-							cellTextLen = 1
+					// Draw each cell text from the cached layouts
+					for ci, cellLayout := range row.cells {
+						if cellLayout == 0 {
+							continue
 						}
-						var cellFmt uintptr
-						if cell.Bold {
-							cellFmt = res.fmtH3
-						} else {
-							cellFmt = res.fmtBody
-						}
-						var cellLayout uintptr
-						comCall(res.dwFactory, 18,
-							uintptr(unsafe.Pointer(&cellTextU[0])),
-							uintptr(cellTextLen),
-							cellFmt,
-							floatBits(colWidths[ci]-cellPad*2),
-							floatBits(10000),
-							uintptr(unsafe.Pointer(&cellLayout)),
+						comCall(res.renderTarget, 28,
+							packPoint2F(padding+geometry.colOffsets[ci]+tableCellPad, y+tableCellPad),
+							cellLayout,
+							res.brushText,
+							0,
 						)
-						if cellLayout != 0 {
-							// Honour the column's alignment from the delimiter row.
-							// IDWriteTextFormat::SetTextAlignment is vtable index 3.
-							if ci < len(td.Aligns) && td.Aligns[ci] != 0 {
-								comCall(cellLayout, 3, uintptr(td.Aligns[ci]))
-							}
-							comCall(res.renderTarget, 28,
-								packPoint2F(cellX+cellPad, y+cellPad),
-								cellLayout,
-								res.brushText,
-								0,
-							)
-							comRelease(cellLayout)
-						}
 					}
 
 					// Draw cell borders
-					for ci := 0; ci <= numCols; ci++ {
-						lineX := padding + colOffsets[ci]
+					for ci := 0; ci <= len(geometry.colWidths); ci++ {
+						lineX := padding + geometry.colOffsets[ci]
 						// Vertical line
 						comCall(res.renderTarget, 15,
 							packPoint2F(lineX, y),
@@ -1351,7 +1397,7 @@ func renderPreview(hwnd uintptr) {
 					// Top border
 					comCall(res.renderTarget, 15,
 						packPoint2F(padding, y),
-						packPoint2F(padding+tableWidth, y),
+						packPoint2F(padding+geometry.tableWidth, y),
 						res.brushHR,
 						floatBits(1),
 						0,
@@ -1359,7 +1405,7 @@ func renderPreview(hwnd uintptr) {
 					// Bottom border
 					comCall(res.renderTarget, 15,
 						packPoint2F(padding, y+fullRowH),
-						packPoint2F(padding+tableWidth, y+fullRowH),
+						packPoint2F(padding+geometry.tableWidth, y+fullRowH),
 						res.brushHR,
 						floatBits(1),
 						0,
@@ -1372,55 +1418,64 @@ func renderPreview(hwnd uintptr) {
 			continue
 		}
 
-		// Create text layout for measurement
-		textU := utf16From(b.Text)
-		textLen := uint32(len(textU) - 1)
-		fmt := getTextFormat(b)
-		if fmt == 0 {
-			continue
+		// Reuse the block's layout unless the pane width changed under it.
+		layoutWidth := drawWidth - b.Indent
+		if b.layout != 0 && b.layoutWidth != layoutWidth {
+			b.releaseLayout()
 		}
+		if b.layout == 0 {
+			textU := utf16From(b.Text)
+			textLen := uint32(len(textU) - 1)
+			fmt := getTextFormat(b)
+			if fmt == 0 {
+				continue
+			}
 
-		var layout uintptr
-		// IDWriteFactory::CreateTextLayout is vtable index 18
-		comCall(res.dwFactory, 18,
-			uintptr(unsafe.Pointer(&textU[0])),
-			uintptr(textLen),
-			fmt,
-			floatBits(drawWidth-b.Indent),
-			floatBits(10000),
-			uintptr(unsafe.Pointer(&layout)),
-		)
-		if layout == 0 {
-			continue
+			var layout uintptr
+			// IDWriteFactory::CreateTextLayout is vtable index 18
+			comCall(res.dwFactory, 18,
+				uintptr(unsafe.Pointer(&textU[0])),
+				uintptr(textLen),
+				fmt,
+				floatBits(layoutWidth),
+				floatBits(10000),
+				uintptr(unsafe.Pointer(&layout)),
+			)
+			if layout == 0 {
+				continue
+			}
+
+			// Apply inline formatting spans (bold, italic, code) via IDWriteTextLayout
+			consolasU := utf16From("Consolas")
+			for _, span := range b.Spans {
+				if span.Bold {
+					// IDWriteTextLayout::SetFontWeight is vtable index 32
+					comCall(layout, 32, uintptr(DWRITE_FONT_WEIGHT_BOLD), packTextRange(uint32(span.Start), uint32(span.Length)))
+				}
+				if span.Italic {
+					// IDWriteTextLayout::SetFontStyle is vtable index 33
+					comCall(layout, 33, uintptr(DWRITE_FONT_STYLE_ITALIC), packTextRange(uint32(span.Start), uint32(span.Length)))
+				}
+				if span.Code {
+					// IDWriteTextLayout::SetFontFamilyName is vtable index 31
+					comCall(layout, 31, uintptr(unsafe.Pointer(&consolasU[0])), packTextRange(uint32(span.Start), uint32(span.Length)))
+					// IDWriteTextLayout::SetFontSize is vtable index 35
+					comCall(layout, 35, floatBits(13), packTextRange(uint32(span.Start), uint32(span.Length)))
+				}
+			}
+
+			// Get metrics to measure height
+			// IDWriteTextLayout inherits from IDWriteTextFormat
+			// GetMetrics is at vtable index 60 for IDWriteTextLayout
+			var metrics [36]byte // DWRITE_TEXT_METRICS struct
+			comCall(layout, 60, uintptr(unsafe.Pointer(&metrics[0])))
+
+			b.layout = layout
+			b.layoutWidth = layoutWidth
+			b.Height = *(*float32)(unsafe.Pointer(&metrics[16])) // height field
 		}
-
-		// Apply inline formatting spans (bold, italic, code) via IDWriteTextLayout
-		consolasU := utf16From("Consolas")
-		for _, span := range b.Spans {
-			if span.Bold {
-				// IDWriteTextLayout::SetFontWeight is vtable index 32
-				comCall(layout, 32, uintptr(DWRITE_FONT_WEIGHT_BOLD), packTextRange(uint32(span.Start), uint32(span.Length)))
-			}
-			if span.Italic {
-				// IDWriteTextLayout::SetFontStyle is vtable index 33
-				comCall(layout, 33, uintptr(DWRITE_FONT_STYLE_ITALIC), packTextRange(uint32(span.Start), uint32(span.Length)))
-			}
-			if span.Code {
-				// IDWriteTextLayout::SetFontFamilyName is vtable index 31
-				comCall(layout, 31, uintptr(unsafe.Pointer(&consolasU[0])), packTextRange(uint32(span.Start), uint32(span.Length)))
-				// IDWriteTextLayout::SetFontSize is vtable index 35
-				comCall(layout, 35, floatBits(13), packTextRange(uint32(span.Start), uint32(span.Length)))
-			}
-		}
-
-		// Get metrics to measure height
-		// IDWriteTextLayout inherits from IDWriteTextFormat
-		// GetMetrics is at vtable index 60 for IDWriteTextLayout
-		var metrics [36]byte // DWRITE_TEXT_METRICS struct
-		comCall(layout, 60, uintptr(unsafe.Pointer(&metrics[0])))
-		textH := *(*float32)(unsafe.Pointer(&metrics[16])) // height field
-
-		b.Height = textH
+		layout := b.layout
+		textH := b.Height
 		// Only draw if visible
 		if y-scrollY+textH >= 0 && y-scrollY < clientH {
 			// Draw code block background
@@ -1478,7 +1533,7 @@ func renderPreview(hwnd uintptr) {
 			)
 		}
 
-		comRelease(layout)
+		// The layout stays on the block; it is released when the document changes.
 		y += textH
 	}
 
@@ -1626,7 +1681,10 @@ func mainWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 
 	case WM_COMMAND:
 		if hiword(wParam) == EN_CHANGE && loword(wParam) == 1 {
-			setTimer.Call(hwnd, TIMER_DEBOUNCE, 50, 0)
+			// Re-parsing a large document costs under a millisecond and a repaint
+			// about the same, so the preview can follow typing closely. The debounce
+			// only needs to coalesce a burst of keystrokes, not hide slow work.
+			setTimer.Call(hwnd, TIMER_DEBOUNCE, 16, 0)
 		}
 		if handleMenuCommand(uintptr(loword(wParam))) {
 			return 0
@@ -1737,6 +1795,9 @@ func previewWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 }
 
 func updatePreview() {
+	// The old blocks own Direct2D text layouts; drop them before replacing them.
+	releaseBlockLayouts(currentBlocks)
+
 	length, _, _ := getWindowTextLengthW.Call(editorHwnd)
 	if length == 0 {
 		currentBlocks = nil
