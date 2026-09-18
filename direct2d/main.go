@@ -146,6 +146,7 @@ const (
 	WM_TIMER      = 0x0113
 	WM_KEYDOWN    = 0x0100
 	WM_MOUSEWHEEL = 0x020A
+	WM_NOTIFY     = 0x004E
 
 	WM_SETCURSOR      = 0x0020
 	WM_MOUSEMOVE      = 0x0200
@@ -336,6 +337,28 @@ func appendMenu(menu uintptr, flags uintptr, id uintptr, text string) {
 	appendMenuW.Call(menu, flags, id, uintptr(unsafe.Pointer(&t[0])))
 }
 
+// Editing commands are spelled differently by the two controls, so they are named
+// once here rather than at each call site.
+func editorUndo()  { sendMessageW.Call(editorHwnd, pick(SCI_UNDO, WM_UNDO), 0, 0) }
+func editorCut()   { sendMessageW.Call(editorHwnd, pick(SCI_CUT, WM_CUT), 0, 0) }
+func editorCopy()  { sendMessageW.Call(editorHwnd, pick(SCI_COPY, WM_COPY), 0, 0) }
+func editorPaste() { sendMessageW.Call(editorHwnd, pick(SCI_PASTE, WM_PASTE), 0, 0) }
+func editorSelectAll() {
+	if usingScintilla {
+		sendMessageW.Call(editorHwnd, SCI_SELECTALL, 0, 0)
+		return
+	}
+	sendMessageW.Call(editorHwnd, EM_SETSEL, 0, ^uintptr(0))
+}
+
+// pick returns the Scintilla message when Scintilla is in use, the EDIT one otherwise.
+func pick(scintilla, edit uintptr) uintptr {
+	if usingScintilla {
+		return scintilla
+	}
+	return edit
+}
+
 func handleMenuCommand(id uintptr) bool {
 	switch id {
 	case idFileOpen:
@@ -353,18 +376,18 @@ func handleMenuCommand(id uintptr) bool {
 	case idFileExit:
 		destroyWindowProc.Call(mainHwnd)
 	case idEditUndo:
-		sendMessageW.Call(editorHwnd, WM_UNDO, 0, 0)
+		editorUndo()
 		updatePreview()
 	case idEditCut:
-		sendMessageW.Call(editorHwnd, WM_CUT, 0, 0)
+		editorCut()
 		updatePreview()
 	case idEditCopy:
-		sendMessageW.Call(editorHwnd, WM_COPY, 0, 0)
+		editorCopy()
 	case idEditPaste:
-		sendMessageW.Call(editorHwnd, WM_PASTE, 0, 0)
+		editorPaste()
 		updatePreview()
 	case idEditAll:
-		sendMessageW.Call(editorHwnd, EM_SETSEL, 0, ^uintptr(0))
+		editorSelectAll()
 	case idViewEditor:
 		toggleCollapse(false) // collapse the preview, or bring it back
 	case idViewPreview:
@@ -899,13 +922,15 @@ func packTextRange(start, length uint32) uintptr {
 
 // Global state
 var (
-	hInstance   uintptr
-	mainHwnd    uintptr
-	editorHwnd  uintptr
-	previewHwnd uintptr
-	editorFont  uintptr
-	currentFile string
-	lineEnding  = "\n"
+	hInstance  uintptr
+	mainHwnd   uintptr
+	editorHwnd uintptr
+	// usingScintilla records which editing control was created at startup.
+	usingScintilla bool
+	previewHwnd    uintptr
+	editorFont     uintptr
+	currentFile    string
+	lineEnding     = "\n"
 
 	currentBlocks []LayoutBlock
 	scrollY       float32
@@ -1236,7 +1261,7 @@ func setSplitRatio(ratio float64) {
 	if ratio > 0 && ratio < 1 {
 		restoreSplitRatio = ratio
 	}
-	layoutPanes()
+	layoutPanes(mainHwnd)
 }
 
 // toggleCollapse collapses the named pane, or restores the previous split if that
@@ -1258,12 +1283,17 @@ func toggleCollapse(collapseEditor bool) {
 }
 
 // layoutPanes positions the editor, the preview and the divider for the current split.
-func layoutPanes() {
-	if mainHwnd == 0 {
+// The window is passed in because the messages that trigger a layout arrive while
+// CreateWindowEx is still running, before the mainHwnd global has been assigned.
+func layoutPanes(hwnd uintptr) {
+	if hwnd == 0 {
+		hwnd = mainHwnd
+	}
+	if hwnd == 0 {
 		return
 	}
 	var rc [16]byte
-	getClientRect.Call(mainHwnd, uintptr(unsafe.Pointer(&rc[0])))
+	getClientRect.Call(hwnd, uintptr(unsafe.Pointer(&rc[0])))
 	width := *(*int32)(unsafe.Pointer(&rc[8]))
 	height := *(*int32)(unsafe.Pointer(&rc[12]))
 
@@ -1283,7 +1313,7 @@ func layoutPanes() {
 		moveWindow.Call(previewHwnd, uintptr(previewX), 0, uintptr(previewW), uintptr(height), 1)
 		showWindowProc.Call(previewHwnd, SW_SHOWNOACTIVATE)
 	}
-	invalidateRect.Call(mainHwnd, 0, 1)
+	invalidateRect.Call(hwnd, 0, 1)
 }
 
 // overDivider reports whether a client x coordinate falls on the splitter.
@@ -1575,26 +1605,50 @@ func updateScrollbar(hwnd uintptr, clientH int32) {
 func mainWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	switch msg {
 	case WM_CREATE:
-		// Editor (left)
+		// Editor (left). Scintilla when it is available, the plain EDIT control when
+		// it is not, so a failure to unpack the DLLs costs features rather than the
+		// whole application.
+		editorClass := "EDIT"
+		if err := loadScintilla(); err == nil {
+			editorClass = "Scintilla"
+			usingScintilla = true
+		}
 		editorHwnd, _, _ = createWindowExW.Call(
 			WS_EX_CLIENTEDGE,
-			uintptr(unsafe.Pointer(utf16Ptr("EDIT"))),
+			uintptr(unsafe.Pointer(utf16Ptr(editorClass))),
 			0,
 			WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_WANTRETURN,
 			0, 0, 0, 0,
 			hwnd, 1, hInstance, 0,
 		)
-		editorFont, _, _ = createFontW.Call(
-			uintptr(0xFFFFFFF2), 0, 0, 0, // -14 pixel height
-			400, 0, 0, 0, 0, 0, 0, 0, 0,
-			uintptr(unsafe.Pointer(utf16Ptr("Consolas"))),
-		)
-		sendMessageW.Call(editorHwnd, WM_SETFONT, editorFont, 1)
+		if editorHwnd == 0 && usingScintilla {
+			// The class did not register; fall back rather than run without an editor.
+			usingScintilla = false
+			editorHwnd, _, _ = createWindowExW.Call(
+				WS_EX_CLIENTEDGE,
+				uintptr(unsafe.Pointer(utf16Ptr("EDIT"))),
+				0,
+				WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_WANTRETURN,
+				0, 0, 0, 0,
+				hwnd, 1, hInstance, 0,
+			)
+		}
 
-		// Set editor margins (10px left and right)
-		const EM_SETMARGINS = 0x00D3
-		margins := uintptr((10 << 16) | 10)                      // 10px left and right
-		sendMessageW.Call(editorHwnd, EM_SETMARGINS, 3, margins) // EC_LEFTMARGIN|EC_RIGHTMARGIN = 3
+		if usingScintilla {
+			configureEditor()
+		} else {
+			editorFont, _, _ = createFontW.Call(
+				uintptr(0xFFFFFFF2), 0, 0, 0, // -14 pixel height
+				400, 0, 0, 0, 0, 0, 0, 0, 0,
+				uintptr(unsafe.Pointer(utf16Ptr("Consolas"))),
+			)
+			sendMessageW.Call(editorHwnd, WM_SETFONT, editorFont, 1)
+
+			// Set editor margins (10px left and right)
+			const EM_SETMARGINS = 0x00D3
+			margins := uintptr((10 << 16) | 10)                      // 10px left and right
+			sendMessageW.Call(editorHwnd, EM_SETMARGINS, 3, margins) // EC_LEFTMARGIN|EC_RIGHTMARGIN = 3
+		}
 
 		// Preview (right) — custom D2D window
 		previewClass := utf16From("TinyMDD2DPreview")
@@ -1623,7 +1677,7 @@ func mainWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		return 0
 
 	case WM_SIZE:
-		layoutPanes()
+		layoutPanes(hwnd)
 		return 0
 
 	case WM_SETCURSOR:
@@ -1678,6 +1732,20 @@ func mainWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			setSplitRatio(0.5)
 			return 0
 		}
+
+	case WM_NOTIFY:
+		// Scintilla reports edits here rather than through EN_CHANGE. SCN_MODIFIED
+		// also covers styling and folding, so only text changes refresh the preview.
+		if usingScintilla && lParam != 0 {
+			code := *(*uint32)(unsafe.Pointer(lParam + 16)) // NMHDR.code
+			if code == SCN_MODIFIED {
+				modification := *(*uint32)(unsafe.Pointer(lParam + 40)) // SCNotification.modificationType
+				if modification&(SC_MOD_INSERTTEXT|SC_MOD_DELETETEXT) != 0 {
+					setTimer.Call(hwnd, TIMER_DEBOUNCE, 16, 0)
+				}
+			}
+		}
+		return 0
 
 	case WM_COMMAND:
 		if hiword(wParam) == EN_CHANGE && loword(wParam) == 1 {
@@ -1798,17 +1866,14 @@ func updatePreview() {
 	// The old blocks own Direct2D text layouts; drop them before replacing them.
 	releaseBlockLayouts(currentBlocks)
 
-	length, _, _ := getWindowTextLengthW.Call(editorHwnd)
-	if length == 0 {
+	mdText := editorText()
+	if mdText == "" {
 		currentBlocks = nil
 		scrollY = 0
 		totalHeight = 0
 		invalidateRect.Call(previewHwnd, 0, 0)
 		return
 	}
-	buf := make([]uint16, length+1)
-	getWindowTextW.Call(editorHwnd, uintptr(unsafe.Pointer(&buf[0])), length+1)
-	mdText := syscall.UTF16ToString(buf)
 
 	currentBlocks = markdownToLayout([]byte(mdText))
 	invalidateRect.Call(previewHwnd, 0, 0)
@@ -1827,11 +1892,33 @@ func refreshWindowTitle() {
 	setWindowTextW.Call(mainHwnd, uintptr(unsafe.Pointer(&title[0])))
 }
 
+// editorText returns the document. Scintilla holds UTF-8 with the line endings it was
+// given; the EDIT control holds UTF-16 and insists on CRLF, which is why the two paths
+// differ here and nowhere else.
 func editorText() string {
+	if usingScintilla {
+		return string(scintillaText())
+	}
 	length, _, _ := getWindowTextLengthW.Call(editorHwnd)
 	buf := make([]uint16, length+1)
 	getWindowTextW.Call(editorHwnd, uintptr(unsafe.Pointer(&buf[0])), length+1)
 	return syscall.UTF16ToString(buf)
+}
+
+// setDocument replaces the editor's contents, reporting whether it took.
+func setDocument(content string) bool {
+	if usingScintilla {
+		setScintillaText([]byte(content))
+		return true
+	}
+	// The EDIT control needs CRLF to show line breaks at all.
+	crlf := strings.ReplaceAll(strings.ReplaceAll(content, "\r\n", "\n"), "\n", "\r\n")
+	encoded, err := syscall.UTF16FromString(crlf)
+	if err != nil {
+		return false
+	}
+	loaded, _, _ := sendMessageW.Call(editorHwnd, WM_SETTEXT, 0, uintptr(unsafe.Pointer(&encoded[0])))
+	return loaded != 0
 }
 
 func saveFile() {
@@ -1874,17 +1961,22 @@ func loadFile(path string) error {
 		return err
 	}
 	content := string(data)
+	if strings.ContainsRune(content, 0) {
+		return fmt.Errorf("the file contains NUL characters and cannot be opened as UTF-8 Markdown")
+	}
 	ending := "\n"
 	if strings.Contains(content, "\r\n") {
 		ending = "\r\n"
 	}
-	content = strings.ReplaceAll(strings.ReplaceAll(content, "\r\n", "\n"), "\n", "\r\n")
-	encoded, err := syscall.UTF16FromString(content)
-	if err != nil {
-		return fmt.Errorf("the file contains NUL characters and cannot be opened as UTF-8 Markdown")
+	if usingScintilla {
+		// Keep Enter inserting the break the document already uses.
+		mode := uintptr(SC_EOL_LF)
+		if ending == "\r\n" {
+			mode = SC_EOL_CRLF
+		}
+		sci(SCI_SETEOLMODE, mode, 0)
 	}
-	loaded, _, _ := sendMessageW.Call(editorHwnd, WM_SETTEXT, 0, uintptr(unsafe.Pointer(&encoded[0])))
-	if loaded == 0 {
+	if !setDocument(content) {
 		return fmt.Errorf("could not load the document into the editor")
 	}
 	currentFile = path
@@ -2036,16 +2128,16 @@ func handleShortcut(wParam uintptr) bool {
 	shift, _, _ := getKeyState.Call(VK_SHIFT)
 	switch {
 	case wParam == VK_A:
-		sendMessageW.Call(editorHwnd, EM_SETSEL, 0, ^uintptr(0))
+		editorSelectAll()
 	case wParam == VK_C && int16(shift) < 0:
 		copyCurrentFilePath()
 	case wParam == VK_C:
-		sendMessageW.Call(editorHwnd, WM_COPY, 0, 0)
+		editorCopy()
 	case wParam == VK_V:
-		sendMessageW.Call(editorHwnd, WM_PASTE, 0, 0)
+		editorPaste()
 		updatePreview()
 	case wParam == VK_X:
-		sendMessageW.Call(editorHwnd, WM_CUT, 0, 0)
+		editorCut()
 		updatePreview()
 	case wParam == VK_O:
 		openFile()
