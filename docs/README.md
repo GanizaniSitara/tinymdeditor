@@ -1,3 +1,5 @@
+> **Historical.** This is the original comparison of four rendering back ends. Only the WebView2 version is kept; the Direct2D, GDI and RichEdit prototypes have been retired and remain in the git history.
+
 # TinyMD — Native Win32 Markdown Editor Prototypes
 
 Single-file Go markdown editors for Windows, exploring three native rendering approaches as alternatives to WebView2. Each prototype is a self-contained `main.go` with no CGo — all Win32/COM calls go through `syscall`.
