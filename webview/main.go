@@ -25,6 +25,9 @@ import (
 var currentFile string
 var browseRoot string
 
+// addRecentLater defers recording the command-line file until settings are loaded.
+var addRecentLater bool
+
 type treeNode struct {
 	Name     string     `json:"name"`
 	Path     string     `json:"path,omitempty"`
@@ -317,40 +320,6 @@ func foregroundIs(hwnd uintptr) bool {
 	return foreground == hwnd
 }
 
-func installMainMenu(w webview2.WebView) {
-	hwnd := uintptr(w.Window())
-	menu, _, _ := createMenu.Call()
-	fileMenu, _, _ := createPopupMenu.Call()
-	editMenu, _, _ := createPopupMenu.Call()
-	helpMenu, _, _ := createPopupMenu.Call()
-
-	appendMenu(fileMenu, mfString, idFileOpen, "&Open...\tCtrl+O")
-	appendMenu(fileMenu, mfString, idFileSave, "&Save\tCtrl+S")
-	appendMenu(fileMenu, mfString, idFileSaveAs, "Save &As...\tCtrl+Shift+S")
-	appendMenu(fileMenu, mfString, idFilePrint, "&Print...\tCtrl+P")
-	appendMenu(fileMenu, mfSeparator, 0, "")
-	appendMenu(fileMenu, mfString, idFileReveal, "Show in &Folder\tCtrl+E")
-	appendMenu(fileMenu, mfSeparator, 0, "")
-	appendMenu(fileMenu, mfString, idFileExit, "E&xit")
-
-	appendMenu(editMenu, mfString, idEditUndo, "&Undo\tCtrl+Z")
-	appendMenu(editMenu, mfSeparator, 0, "")
-	appendMenu(editMenu, mfString, idEditCut, "Cu&t\tCtrl+X")
-	appendMenu(editMenu, mfString, idEditCopy, "&Copy\tCtrl+C")
-	appendMenu(editMenu, mfString, idEditPaste, "&Paste\tCtrl+V")
-	appendMenu(editMenu, mfSeparator, 0, "")
-	appendMenu(editMenu, mfString, idEditAll, "Select &All\tCtrl+A")
-
-	appendMenu(helpMenu, mfString, idHelpAbout, "&About TinyMD")
-
-	appendMenu(menu, mfPopup, fileMenu, "&File")
-	appendMenu(menu, mfPopup, editMenu, "&Edit")
-	appendMenu(menu, mfPopup, helpMenu, "&Help")
-	setMenu.Call(hwnd, menu)
-	drawMenuBar.Call(hwnd)
-	installMenuWndProc(w)
-}
-
 func appendMenu(menu uintptr, flags uintptr, id uintptr, text string) {
 	if flags&mfSeparator != 0 {
 		appendMenuW.Call(menu, flags, 0, 0)
@@ -366,48 +335,13 @@ func installMenuWndProc(w webview2.WebView) {
 		if msg == wmCommand && handleMenuCommand(w, wParam&0xffff) {
 			return 0
 		}
+		if msg == wmClose && !handleClose(w) {
+			return 0
+		}
 		ret, _, _ := callWindowProcW.Call(oldMainWndProc, hwnd, msg, wParam, lParam)
 		return ret
 	})
 	oldMainWndProc, _, _ = setWindowLongPtrW.Call(hwnd, ^uintptr(0)-3, menuWndProcCallback)
-}
-
-func handleMenuCommand(w webview2.WebView, id uintptr) bool {
-	var script string
-	switch id {
-	case idFileOpen:
-		script = `window.tinyMdMenuCommand && window.tinyMdMenuCommand("open");`
-	case idFileSave:
-		script = `window.tinyMdMenuCommand && window.tinyMdMenuCommand("save");`
-	case idFileSaveAs:
-		script = `window.tinyMdMenuCommand && window.tinyMdMenuCommand("saveAs");`
-	case idFilePrint:
-		script = `window.tinyMdMenuCommand && window.tinyMdMenuCommand("print");`
-	case idFileReveal:
-		script = `window.tinyMdMenuCommand && window.tinyMdMenuCommand("reveal");`
-	case idFileExit:
-		w.Destroy()
-		return true
-	case idEditUndo:
-		script = `window.tinyMdMenuCommand && window.tinyMdMenuCommand("undo");`
-	case idEditCut:
-		script = `window.tinyMdHandleEditorShortcut && window.tinyMdHandleEditorShortcut("x", true);`
-	case idEditCopy:
-		script = `window.tinyMdHandleEditorShortcut && window.tinyMdHandleEditorShortcut("c", true);`
-	case idEditPaste:
-		script = `window.tinyMdHandleEditorShortcut && window.tinyMdHandleEditorShortcut("v", true);`
-	case idEditAll:
-		script = `window.tinyMdHandleEditorShortcut && window.tinyMdHandleEditorShortcut("a", true);`
-	case idHelpAbout:
-		showAboutDialog(uintptr(w.Window()))
-		return true
-	default:
-		return false
-	}
-	w.Dispatch(func() {
-		w.Eval(script)
-	})
-	return true
 }
 
 func showAboutDialog(hwnd uintptr) {
@@ -551,7 +485,7 @@ func splashWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			0, 0, 0,
 			700, // bold
 			0, 0, 0, 0, 0, 0, 0, 0,
-			uintptr(unsafe.Pointer(utf16Ptr("Segoe UI"))),
+			uintptr(unsafe.Pointer(utf16Ptr("Arial"))),
 		)
 		oldFont, _, _ := selectObject.Call(hdc, titleFont)
 		setTextColor.Call(hdc, 0x00222222) // dark gray
@@ -573,7 +507,7 @@ func splashWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			0, 0, 0,
 			400, // normal
 			0, 0, 0, 0, 0, 0, 0, 0,
-			uintptr(unsafe.Pointer(utf16Ptr("Segoe UI"))),
+			uintptr(unsafe.Pointer(utf16Ptr("Arial"))),
 		)
 		selectObject.Call(hdc, subFont)
 		setTextColor.Call(hdc, 0x00999999) // light gray
@@ -663,9 +597,15 @@ func destroySplash(hwnd uintptr) {
 func main() {
 	var initialContent string
 	autoPrint := false
-	for _, arg := range os.Args[1:] {
+	selftestOut := ""
+	args := os.Args[1:]
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		if arg == "--print" {
 			autoPrint = true
+		} else if arg == "--selftest" && i+1 < len(args) {
+			selftestOut = args[i+1]
+			i++
 		} else if currentFile == "" && browseRoot == "" {
 			info, err := os.Stat(arg)
 			if err == nil && info.IsDir() {
@@ -673,16 +613,24 @@ func main() {
 				browseRoot = abs
 			} else {
 				currentFile = arg
-				data, err := os.ReadFile(currentFile)
-				if err == nil {
-					initialContent = string(data)
+				if content, err := readDocument(currentFile); err == nil {
+					initialContent = content
+					addRecentLater = true
 				}
 			}
 		}
 	}
 
+	loadSettings()
+	if addRecentLater {
+		addRecent(currentFile)
+	}
+
 	// Show a native splash window immediately (~50ms) while WebView2 loads (~2-3s).
-	splash := showSplash(windowTitle())
+	var splash uintptr
+	if selftestOut == "" {
+		splash = showSplash(windowTitle())
+	}
 
 	// Use a fixed data path so WebView2 reuses its cached browser profile
 	// instead of recreating it every launch (~1s saving on cold start).
@@ -705,9 +653,15 @@ func main() {
 		os.Exit(1)
 	}
 	defer w.Destroy()
+	mainHwnd = uintptr(w.Window())
 	installMainMenu(w)
-	installEditorKeyboardHook(w)
-	defer uninstallEditorKeyboardHook()
+	if selftestOut == "" {
+		installEditorKeyboardHook(w)
+		defer uninstallEditorKeyboardHook()
+	} else {
+		startSelftest(w, selftestOut)
+	}
+	bindShell(w)
 
 	// WebView2 is ready — destroy splash so the real window takes over.
 	destroySplash(splash)
@@ -732,10 +686,11 @@ func main() {
 		if currentFile == "" {
 			return "no file"
 		}
-		err := os.WriteFile(currentFile, []byte(content), 0644)
+		err := os.WriteFile(currentFile, documentBytes(content), 0644)
 		if err != nil {
 			return "error: " + err.Error()
 		}
+		addRecent(currentFile)
 		return "ok"
 	})
 
@@ -751,13 +706,15 @@ func main() {
 		if !strings.HasPrefix(strings.ToLower(abs), strings.ToLower(browseRoot)) {
 			return map[string]string{"error": "path outside browse root"}
 		}
-		data, err := os.ReadFile(abs)
+		content, err := readDocument(abs)
 		if err != nil {
 			return map[string]string{"error": err.Error()}
 		}
 		currentFile = abs
+		dirty = false
+		addRecent(abs)
 		w.SetTitle(windowTitle())
-		return map[string]string{"content": string(data), "name": filepath.Base(abs)}
+		return map[string]string{"content": content, "name": filepath.Base(abs)}
 	})
 
 	w.Bind("goOpenFile", func() map[string]string {
@@ -765,13 +722,15 @@ func main() {
 		if path == "" {
 			return map[string]string{}
 		}
-		data, err := os.ReadFile(path)
+		content, err := readDocument(path)
 		if err != nil {
 			return map[string]string{"error": err.Error()}
 		}
 		currentFile = path
+		dirty = false
+		addRecent(path)
 		w.SetTitle(windowTitle())
-		return map[string]string{"content": string(data), "name": filepath.Base(path)}
+		return map[string]string{"content": content, "name": filepath.Base(path)}
 	})
 
 	w.Bind("goShowSaveDialog", func() string {
@@ -789,10 +748,11 @@ func main() {
 		if path == "" {
 			return ""
 		}
-		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		if err := os.WriteFile(path, documentBytes(content), 0644); err != nil {
 			return "error: " + err.Error()
 		}
 		currentFile = path
+		addRecent(path)
 		w.SetTitle(windowTitle())
 		return filepath.Base(path)
 	})
@@ -821,13 +781,18 @@ func main() {
 }
 
 func windowTitle() string {
-	if currentFile != "" {
-		return "TinyMD — " + currentFile
+	name := "Untitled"
+	switch {
+	case currentFile != "":
+		name = currentFile
+	case browseRoot != "":
+		name = browseRoot
 	}
-	if browseRoot != "" {
-		return "TinyMD — " + browseRoot
+	if dirty {
+		// The leading asterisk is the usual Windows sign of unsaved changes.
+		return "*" + name + " — TinyMD"
 	}
-	return "TinyMD Editor"
+	return name + " — TinyMD"
 }
 
 func jsEscape(s string) string {
@@ -843,491 +808,15 @@ func jsEscape(s string) string {
 }
 
 func htmlPage(initialContent, fileName, treeJSONStr string) string {
-	browseMode := "false"
-	if treeJSONStr != "" {
-		browseMode = "true"
-	}
 	if treeJSONStr == "" {
 		treeJSONStr = "null"
 	}
-	_ = browseMode
-	return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-* { margin:0; padding:0; box-sizing:border-box; }
-html, body { height:100%; overflow:hidden; font-family: -apple-system, 'Segoe UI', sans-serif; background:#fff; color:#222; }
-
-.toolbar {
-  height: 36px; background:#f5f5f5; display:flex; align-items:center;
-  padding: 0 12px; border-bottom: 1px solid #ddd; font-size:12px; gap:12px;
-}
-.toolbar .filename { color:#0366d6; font-weight:600; }
-.toolbar .saved { color:#28a745; opacity:0; transition: opacity 0.3s; }
-.toolbar .saved.show { opacity:1; }
-.toolbar .hint { color:#999; margin-left:auto; }
-
-.container { display:flex; height:calc(100% - 36px); }
-
-.tree-pane {
-  width: 280px; flex-shrink:0; overflow-y:auto; overflow-x:hidden;
-  background:#fafafa; border-right:1px solid #ddd;
-  font-size: 13px; padding: 8px 0;
-}
-.tree-pane.hidden { display:none; }
-.tree-pane ul { list-style:none; padding-left: 14px; margin:0; }
-.tree-pane > ul { padding-left: 8px; }
-.tree-pane .node { padding: 2px 6px; cursor: pointer; border-radius:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.tree-pane .node:hover { background:#eaeaea; }
-.tree-pane .node.file.active { background:#0366d6; color:#fff; }
-.tree-pane .node.dir { color:#555; font-weight:600; }
-.tree-pane .node.file { color:#0366d6; }
-.tree-pane .caret { display:inline-block; width:12px; color:#888; }
-
-.editor-pane {
-  flex:1 1 50%; height:100%; display:flex; flex-direction:column;
-  overflow:hidden;
-}
-.editor-pane textarea {
-  flex:1; min-width:50vw; resize:none; border:none; outline:none;
-  background:#fff; color:#222; padding:16px; font-size:14px;
-  font-family: 'Cascadia Code','Consolas','Courier New', monospace;
-  line-height:1.6; tab-size:4;
-}
-
-.divider {
-  width:6px; flex-shrink:0; cursor:col-resize;
-  background:#e0e0e0; transition:background 0.15s;
-}
-.divider:hover, .divider.active { background:#0366d6; }
-
-.preview-pane {
-  flex:1 1 50%; height:100%; overflow-y:auto; padding:20px 28px;
-  background:#fff;
-  font-variant-ligatures: common-ligatures;
-}
-
-/* Markdown rendered styles */
-.preview-pane h1 { font-size:2em; margin:0.5em 0 0.3em; color:#111; border-bottom:1px solid #ddd; padding-bottom:0.2em; }
-.preview-pane h2 { font-size:1.5em; margin:0.5em 0 0.3em; color:#111; border-bottom:1px solid #eee; padding-bottom:0.2em; }
-.preview-pane h3 { font-size:1.25em; margin:0.5em 0 0.3em; color:#111; }
-.preview-pane h4,h5,h6 { margin:0.4em 0; color:#111; }
-.preview-pane p { margin:0.5em 0; line-height:1.7; }
-.preview-pane a { color:#0366d6; }
-.preview-pane code {
-  background:#f0f0f0; padding:2px 6px; border-radius:3px; font-size:0.9em;
-  font-family: 'Cascadia Code','Fira Code','JetBrains Mono','Consolas', monospace;
-  font-variant-ligatures: common-ligatures;
-}
-.preview-pane pre {
-  background:#f6f8fa; padding:12px 16px; border-radius:6px; overflow-x:auto;
-  margin:0.6em 0; border:1px solid #e1e4e8;
-  font-variant-ligatures: common-ligatures;
-}
-.preview-pane pre code { background:none; padding:0; }
-.preview-pane blockquote {
-  border-left:4px solid #0366d6; padding:4px 16px; margin:0.6em 0;
-  color:#666; background:#f9f9f9;
-}
-.preview-pane ul, .preview-pane ol { padding-left:1.8em; margin:0.4em 0; }
-.preview-pane li { margin:0.2em 0; line-height:1.6; }
-.preview-pane table { border-collapse:collapse; margin:0.6em 0; }
-.preview-pane th, .preview-pane td { border:1px solid #ddd; padding:6px 12px; }
-.preview-pane th { background:#f6f8fa; }
-.preview-pane img { max-width:100%; }
-.preview-pane hr { border:none; border-top:1px solid #ddd; margin:1em 0; }
-
-/* Scrollbar */
-::-webkit-scrollbar { width:10px; }
-::-webkit-scrollbar-track { background:#fff; }
-::-webkit-scrollbar-thumb { background:#ccc; border-radius:5px; }
-::-webkit-scrollbar-thumb:hover { background:#aaa; }
-
-/* Print: show only the formatted preview */
-@media print {
-  .toolbar, .editor-pane, .divider { display:none !important; }
-  .container { display:block !important; height:auto !important; }
-  .preview-pane {
-    flex:none !important; width:100% !important; height:auto !important;
-    overflow:visible !important; padding:0 !important;
-  }
-}
-</style>
-</head>
-<body>
-
-<div class="toolbar">
-  <span class="filename" id="fname">TinyMD</span>
-  <span class="saved" id="saved">Saved!</span>
-  <span class="hint">Ctrl+O open · Ctrl+S save · Ctrl+Shift+S save as · Ctrl+E folder · Ctrl+P print</span>
-</div>
-
-<div class="container">
-  <div class="tree-pane hidden" id="tree"></div>
-  <div class="editor-pane">
-    <textarea id="editor" spellcheck="false" placeholder="Type your Markdown here..."></textarea>
-  </div>
-  <div class="divider" id="divider"></div>
-  <div class="preview-pane" id="preview"></div>
-</div>
-
-<script>
-var _initContent = "` + jsEscape(initialContent) + `";
-var _initFname = "` + jsEscape(fileName) + `";
-var _tree = ` + treeJSONStr + `;
-
-// Lightweight inline markdown renderer for instant startup (no CDN wait)
-function quickMd(s) {
-  var h = s
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/^### (.+)$/gm,'<h3>$1</h3>')
-    .replace(/^## (.+)$/gm,'<h2>$1</h2>')
-    .replace(/^# (.+)$/gm,'<h1>$1</h1>')
-    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g,'<em>$1</em>')
-    .replace(/\x60([^\x60]+)\x60/g,'<code>$1</code>')
-    .replace(/^[-*] (.+)$/gm,'<li>$1</li>')
-    .replace(/^---$/gm,'<hr>')
-    .replace(/\n\n/g,'</p><p>')
-    .replace(/\n/g,'<br>');
-  return '<p>' + h + '</p>';
-}
-
-var useMarked = false;
-
-function render() {
-  var text = document.getElementById('editor').value;
-  document.getElementById('preview').innerHTML = useMarked ? marked.parse(text) : quickMd(text);
-}
-
-// Load marked.js async — UI is usable immediately
-var sc = document.createElement('script');
-sc.src = 'https://cdn.jsdelivr.net/npm/marked/marked.min.js';
-sc.async = true;
-sc.onload = function() { marked.setOptions({breaks:true,gfm:true}); useMarked=true; render(); };
-document.head.appendChild(sc);
-
-// Draggable divider between editor and preview panes
-(function() {
-  var divider = document.getElementById('divider');
-  var container = document.querySelector('.container');
-  var editorPane = document.querySelector('.editor-pane');
-  var previewPane = document.querySelector('.preview-pane');
-  var dragging = false;
-
-  divider.addEventListener('mousedown', function(e) {
-    e.preventDefault();
-    dragging = true;
-    divider.classList.add('active');
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  });
-
-  document.addEventListener('mousemove', function(e) {
-    if (!dragging) return;
-    var rect = container.getBoundingClientRect();
-    var offset = e.clientX - rect.left;
-    var pct = (offset / rect.width) * 100;
-    pct = Math.max(15, Math.min(85, pct));
-    editorPane.style.flexBasis = pct + '%';
-    previewPane.style.flexBasis = (100 - pct) + '%';
-  });
-
-  document.addEventListener('mouseup', function() {
-    if (!dragging) return;
-    dragging = false;
-    divider.classList.remove('active');
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
-  });
-})();
-
-// Tree sidebar (browse mode)
-(function() {
-  if (!_tree) return;
-  var pane = document.getElementById('tree');
-  pane.classList.remove('hidden');
-  var activeEl = null;
-
-  function buildList(node) {
-    var ul = document.createElement('ul');
-    (node.children || []).forEach(function(c) {
-      var li = document.createElement('li');
-      var row = document.createElement('div');
-      row.className = 'node ' + (c.dir ? 'dir' : 'file');
-      if (c.dir) {
-        row.innerHTML = '<span class="caret">v</span>' + escapeHtml(c.name);
-        li.appendChild(row);
-        var sub = buildList(c);
-        li.appendChild(sub);
-        row.addEventListener('click', function() {
-          var hidden = sub.style.display === 'none';
-          sub.style.display = hidden ? '' : 'none';
-          row.firstChild.textContent = hidden ? 'v' : '>';
-        });
-      } else {
-        row.textContent = c.name;
-        row.dataset.path = c.path;
-        row.addEventListener('click', async function() {
-          var res = await goLoadFile(c.path);
-          if (res && res.content !== undefined) {
-            document.getElementById('editor').value = res.content;
-            document.getElementById('fname').textContent = res.name;
-            render();
-            document.getElementById('editor').focus();
-            if (activeEl) activeEl.classList.remove('active');
-            row.classList.add('active');
-            activeEl = row;
-          }
-        });
-        li.appendChild(row);
-      }
-      ul.appendChild(li);
-    });
-    return ul;
-  }
-  function escapeHtml(s) {
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
-  var header = document.createElement('div');
-  header.className = 'node dir';
-  header.style.fontSize = '11px';
-  header.style.color = '#888';
-  header.style.padding = '2px 12px 6px';
-  header.textContent = _tree.name;
-  pane.appendChild(header);
-  pane.appendChild(buildList(_tree));
-})();
-
-// Synchronous init — no async bridge calls, everything is instant
-(function() {
-  var editor = document.getElementById('editor');
-  var preview = document.getElementById('preview');
-  var editorPane = document.querySelector('.editor-pane');
-  var savedEl = document.getElementById('saved');
-  var fnameEl = document.getElementById('fname');
-  var editorActive = true;
-  function flashStatus(text) {
-    savedEl.textContent = text || 'Saved!';
-    savedEl.classList.add('show');
-    setTimeout(function() { savedEl.classList.remove('show'); savedEl.textContent = 'Saved!'; }, 1500);
-  }
-  function selectedEditorText() {
-    return editor.value.substring(editor.selectionStart || 0, editor.selectionEnd || 0);
-  }
-  function replaceEditorSelection(text) {
-    var start = editor.selectionStart || 0;
-    var end = editor.selectionEnd || 0;
-    if (typeof editor.setRangeText === 'function') {
-      editor.setRangeText(text, start, end, 'end');
-    } else {
-      editor.value = editor.value.substring(0, start) + text + editor.value.substring(end);
-      editor.selectionStart = editor.selectionEnd = start + text.length;
-    }
-    render();
-  }
-  async function readEditorClipboard() {
-    try {
-      if (typeof goReadClipboard === 'function') {
-        var nativeResult = await goReadClipboard();
-        if (nativeResult && nativeResult.text !== undefined) return nativeResult.text;
-      }
-    } catch (_) {}
-    try {
-      if (navigator.clipboard && navigator.clipboard.readText) {
-        return await navigator.clipboard.readText();
-      }
-    } catch (_) {}
-    return null;
-  }
-  async function writeEditorClipboard(text) {
-    try {
-      if (typeof goWriteClipboard === 'function') {
-        var nativeResult = await goWriteClipboard(text);
-        if (nativeResult === 'ok') return true;
-      }
-    } catch (_) {}
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(text);
-        return true;
-      }
-    } catch (_) {}
-    return false;
-  }
-  function editorShortcutKey(e) {
-    if (!e.ctrlKey || e.altKey || e.metaKey) return '';
-    var key = (e.key || '').toLowerCase();
-    return (key === 'a' || key === 'c' || key === 'v' || key === 'x') ? key : '';
-  }
-  async function handleEditorShortcut(key, force) {
-    if (!force && !(editorActive || document.activeElement === editor)) return false;
-    if (key === 'a') {
-      editor.focus();
-      editor.select();
-      return true;
-    }
-    if (key === 'x') {
-      var cutText = selectedEditorText();
-      if (!cutText) return false;
-      await writeEditorClipboard(cutText);
-      replaceEditorSelection('');
-      return true;
-    }
-    if (key === 'c') {
-      var copyText = selectedEditorText();
-      if (!copyText) return false;
-      await writeEditorClipboard(copyText);
-      return true;
-    }
-    if (key === 'v') {
-      editor.focus();
-      var pasteText = await readEditorClipboard();
-      if (pasteText !== null && pasteText !== undefined) replaceEditorSelection(pasteText);
-      return true;
-    }
-    return false;
-  }
-  window.tinyMdHandleEditorShortcut = handleEditorShortcut;
-  async function openDocument() {
-    var opened = await goOpenFile();
-    if (opened && opened.content !== undefined) {
-      editor.value = opened.content;
-      fnameEl.textContent = opened.name;
-      render();
-      editor.focus();
-      flashStatus('Opened');
-    }
-  }
-  async function saveDocumentAs() {
-    var saveAsName = await goSaveFileAs(editor.value);
-    if (saveAsName && saveAsName.indexOf('error:') !== 0) {
-      fnameEl.textContent = saveAsName;
-      flashStatus('Saved!');
-    }
-  }
-  async function saveDocument() {
-    var result = await goSaveFile(editor.value);
-    if (result === 'ok') {
-      flashStatus('Saved!');
-    } else if (result === 'no file') {
-      var name = await goShowSaveDialog();
-      if (name) {
-        fnameEl.textContent = name;
-        var r2 = await goSaveFile(editor.value);
-        if (r2 === 'ok') flashStatus('Saved!');
-      }
-    }
-  }
-  async function revealDocument() {
-    var reveal = await goRevealFile();
-    if (reveal !== 'ok') flashStatus('No file');
-  }
-  function undoEditor() {
-    editor.focus();
-    document.execCommand('undo');
-    render();
-  }
-  window.tinyMdMenuCommand = async function(command) {
-    if (command === 'open') return openDocument();
-    if (command === 'save') return saveDocument();
-    if (command === 'saveAs') return saveDocumentAs();
-    if (command === 'print') return window.print();
-    if (command === 'reveal') return revealDocument();
-    if (command === 'undo') return undoEditor();
-  };
-
-  if (_initContent) editor.value = _initContent;
-  if (_initFname) fnameEl.textContent = _initFname.replace(/.*[\\\/]/, '');
-
-  editor.addEventListener('input', render);
-  editor.addEventListener('focus', function() { editorActive = true; });
-  editorPane.addEventListener('mousedown', function() {
-    editorActive = true;
-    editor.focus();
-  });
-  document.addEventListener('mousedown', function(e) {
-    if (!editorPane.contains(e.target)) editorActive = false;
-  }, true);
-
-  editor.addEventListener('copy', function(e) {
-    var text = selectedEditorText();
-    if (!text || !e.clipboardData) return;
-    e.clipboardData.setData('text/plain', text);
-    e.preventDefault();
-  });
-
-  preview.addEventListener('copy', function(e) {
-    var selection = window.getSelection();
-    var text = selection ? selection.toString() : '';
-    if (!text) return;
-    if (e.clipboardData) e.clipboardData.setData('text/plain', text);
-    e.preventDefault();
-    writeEditorClipboard(text);
-  });
-
-  editor.addEventListener('paste', function(e) {
-    if (!e.clipboardData) return;
-    var text = e.clipboardData.getData('text/plain');
-    if (text === undefined || text === null) return;
-    e.preventDefault();
-    replaceEditorSelection(text);
-  });
-
-  editor.addEventListener('keydown', function(e) {
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      var start = this.selectionStart;
-      var end = this.selectionEnd;
-      this.value = this.value.substring(0, start) + '\t' + this.value.substring(end);
-      this.selectionStart = this.selectionEnd = start + 1;
-      render();
-    }
-  });
-
-  document.addEventListener('keydown', async function(e) {
-    var key = editorShortcutKey(e);
-    if (!key || !(editorActive || document.activeElement === editor)) return;
-    if ((key === 'c' || key === 'x') && !selectedEditorText()) return;
-    e.preventDefault();
-    e.stopPropagation();
-    await handleEditorShortcut(key);
-  }, true);
-
-  // Top-level shortcuts
-  document.addEventListener('keydown', async function(e) {
-    var key = e.key.toLowerCase();
-    if (e.ctrlKey && key === 'p') {
-      e.preventDefault();
-      window.print();
-      return;
-    }
-    if (e.ctrlKey && key === 'o') {
-      e.preventDefault();
-      await openDocument();
-      return;
-    }
-    if (e.ctrlKey && key === 'e') {
-      e.preventDefault();
-      await revealDocument();
-      return;
-    }
-    if (e.ctrlKey && e.shiftKey && key === 's') {
-      e.preventDefault();
-      await saveDocumentAs();
-      return;
-    }
-    if (e.ctrlKey && key === 's') {
-      e.preventDefault();
-      await saveDocument();
-    }
-  });
-
-  render();
-  editor.focus();
-})();
-</script>
-</body>
-</html>`
+	return strings.NewReplacer(
+		"{{INIT_CONTENT}}", jsEscape(initialContent),
+		"{{INIT_FNAME}}", jsEscape(fileName),
+		"{{TREE}}", treeJSONStr,
+		"{{SETTINGS}}", settingsJSON(),
+		"{{MARKED_JS}}", strings.ReplaceAll(markedJS, "</script", "<\\/script"),
+		"{{APP_JS}}", strings.ReplaceAll(appJS, "</script", "<\\/script"),
+	).Replace(pageHTML)
 }
