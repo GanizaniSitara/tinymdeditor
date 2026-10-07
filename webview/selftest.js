@@ -319,12 +319,234 @@ window.addEventListener('DOMContentLoaded', function() {
     });
   }
 
+  // Clipboard shortcut checks: Ctrl+C / Ctrl+Insert, Shift+Insert, Ctrl+Shift+C,
+  // and the source textarea's copy event. Stubs replace the native bridge functions
+  // and are restored afterwards.
+  function clipboardChecks(done) {
+    var origWrite = window.goWriteClipboard;
+    var origRead = window.goReadClipboard;
+    var origCopyPath = window.goCopyPath;
+
+    function restore() {
+      window.goWriteClipboard = origWrite;
+      window.goReadClipboard = origRead;
+      window.goCopyPath = origCopyPath;
+    }
+
+    function runStep(name, fn, next) {
+      try {
+        fn(function(detail) {
+          try {
+            results.push({ name: name, ok: detail === true, detail: detail === true ? '' : String(detail) });
+          } finally {
+            restore();
+            next();
+          }
+        });
+      } catch (e) {
+        try {
+          results.push({ name: name, ok: false, detail: String(e && e.stack || e) });
+        } finally {
+          restore();
+          next();
+        }
+      }
+    }
+
+    var tests = [
+      function(next) {
+        runStep('rendered pane Ctrl+C copies selection and prevents default', function(cb) {
+          load('Some **bold** text\n');
+          T().setPane('preview');
+          var preview = document.getElementById('preview');
+          preview.focus();
+          select('bold');
+          var written = [];
+          window.goWriteClipboard = function(text) { written.push(text); return 'ok'; };
+          var ev = new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true });
+          preview.dispatchEvent(ev);
+          setTimeout(function() {
+            try {
+              if (!ev.defaultPrevented) {
+                return cb('event default was not prevented' + (written.length ? ', stub received: ' + JSON.stringify(written) : ''));
+              }
+              if (written.length !== 1 || written[0] !== 'bold') {
+                return cb('stub received ' + JSON.stringify(written) + ' want ["bold"]');
+              }
+              cb(true);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      },
+      function(next) {
+        runStep('rendered pane Ctrl+Insert copies selection and prevents default', function(cb) {
+          load('Some **bold** text\n');
+          T().setPane('preview');
+          var preview = document.getElementById('preview');
+          preview.focus();
+          select('bold');
+          var written = [];
+          window.goWriteClipboard = function(text) { written.push(text); return 'ok'; };
+          var ev = new KeyboardEvent('keydown', { key: 'Insert', ctrlKey: true, bubbles: true, cancelable: true });
+          preview.dispatchEvent(ev);
+          setTimeout(function() {
+            try {
+              if (!ev.defaultPrevented) {
+                return cb('event default was not prevented' + (written.length ? ', stub received: ' + JSON.stringify(written) : ''));
+              }
+              if (written.length !== 1 || written[0] !== 'bold') {
+                return cb('stub received ' + JSON.stringify(written) + ' want ["bold"]');
+              }
+              cb(true);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      },
+      function(next) {
+        runStep('markdown pane Ctrl+C copies selected substring', function(cb) {
+          load('alpha beta gamma\n');
+          T().setPane('editor');
+          var ed = document.getElementById('editor');
+          ed.focus();
+          ed.setSelectionRange(6, 10);
+          var written = [];
+          window.goWriteClipboard = function(text) { written.push(text); return 'ok'; };
+          var ev = new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true });
+          ed.dispatchEvent(ev);
+          setTimeout(function() {
+            try {
+              if (written.length !== 1 || written[0] !== 'beta') {
+                return cb('stub received ' + JSON.stringify(written) + ' want ["beta"]' + (ev.defaultPrevented ? '' : ' (default not prevented)'));
+              }
+              cb(true);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      },
+      function(next) {
+        runStep('rendered pane Ctrl+C with collapsed caret leaves event alone', function(cb) {
+          load('Some **bold** text\n');
+          T().setPane('preview');
+          var preview = document.getElementById('preview');
+          preview.focus();
+          place('bold', 0);
+          var written = [];
+          window.goWriteClipboard = function(text) { written.push(text); return 'ok'; };
+          var ev = new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true });
+          preview.dispatchEvent(ev);
+          setTimeout(function() {
+            try {
+              if (ev.defaultPrevented) {
+                return cb('event was default-prevented with collapsed caret');
+              }
+              if (written.length !== 0) {
+                return cb('stub was called unexpectedly with: ' + JSON.stringify(written));
+              }
+              cb(true);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      },
+      function(next) {
+        runStep('rendered pane Shift+Insert replaces selection with clipboard text', function(cb) {
+          load('Some **bold** text\n');
+          T().setPane('preview');
+          var preview = document.getElementById('preview');
+          preview.focus();
+          select('text');
+          window.goReadClipboard = function() { return { text: 'ZED' }; };
+          var ev = new KeyboardEvent('keydown', { key: 'Insert', shiftKey: true, bubbles: true, cancelable: true });
+          preview.dispatchEvent(ev);
+          setTimeout(function() {
+            try {
+              var src = T().source();
+              var want = 'Some **bold** ZED\n';
+              if (src !== want) {
+                return cb('source got ' + JSON.stringify(src) + ' want ' + JSON.stringify(want) + (ev.defaultPrevented ? '' : ' (default not prevented)'));
+              }
+              cb(true);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      },
+      function(next) {
+        runStep('Ctrl+Shift+C calls goCopyPath and not goWriteClipboard', function(cb) {
+          load('Some **bold** text\n');
+          T().setPane('preview');
+          var preview = document.getElementById('preview');
+          preview.focus();
+          select('bold');
+          var copyPathCalled = 0;
+          var written = [];
+          window.goCopyPath = function() { copyPathCalled++; return 'Path copied'; };
+          window.goWriteClipboard = function(text) { written.push(text); return 'ok'; };
+          var ev = new KeyboardEvent('keydown', { key: 'C', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true });
+          preview.dispatchEvent(ev);
+          setTimeout(function() {
+            try {
+              if (copyPathCalled === 0) {
+                return cb('goCopyPath was not called' + (written.length ? ', goWriteClipboard called with: ' + JSON.stringify(written) : ''));
+              }
+              if (written.length !== 0) {
+                return cb('goWriteClipboard was unexpectedly called with: ' + JSON.stringify(written));
+              }
+              cb(true);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      },
+      function(next) {
+        runStep('copy event on textarea writes selected text to clipboard', function(cb) {
+          load('alpha beta gamma\n');
+          T().setPane('editor');
+          var ed = document.getElementById('editor');
+          ed.focus();
+          ed.setSelectionRange(6, 10);
+          var written = [];
+          window.goWriteClipboard = function(text) { written.push(text); return 'ok'; };
+          var dt = new DataTransfer();
+          var ev = new ClipboardEvent('copy', {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: dt
+          });
+          ed.dispatchEvent(ev);
+          setTimeout(function() {
+            try {
+              if (written.length !== 1 || written[0] !== 'beta') {
+                return cb('stub received ' + JSON.stringify(written) + ' want ["beta"]');
+              }
+              cb(true);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      }
+    ];
+
+    var idx = 0;
+    function runNext() {
+      if (idx >= tests.length) {
+        try {
+          restore();
+        } finally {
+          done();
+        }
+        return;
+      }
+      var test = tests[idx++];
+      test(runNext);
+    }
+    runNext();
+  }
+
   (function wait(tries) {
     if (window.tinyMdTest && window.tinyMdTest.ready()) {
       try { run(); } catch (e) { results.push({ name: 'harness', ok: false, detail: String(e) }); }
       keyboardSearch(function() {
-        var failed = results.filter(function(r) { return !r.ok; }).length;
-        goSelftestDone(JSON.stringify({ passed: results.length - failed, failed: failed, errors: selftestErrors, results: results }, null, 1));
+        clipboardChecks(function() {
+          var failed = results.filter(function(r) { return !r.ok; }).length;
+          goSelftestDone(JSON.stringify({ passed: results.length - failed, failed: failed, errors: selftestErrors, results: results }, null, 1));
+        });
       });
       return;
     }
