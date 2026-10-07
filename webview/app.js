@@ -53,6 +53,7 @@ function quickMd(s) {
 function render() {
   var text = editor.value;
   pending = null;
+  clearPreviewHighlight();
   if (!useMarked) {
     preview.innerHTML = quickMd(text);
     blocks = [];
@@ -1360,6 +1361,7 @@ editor.addEventListener('input', function(e) {
   record(editor.value, editor.selectionEnd, editor.selectionStart, editor.selectionStart, kind);
   render();
   updateDirty();
+  schedulePreviewHighlight();
 });
 
 editor.addEventListener('copy', function(e) {
@@ -1530,6 +1532,9 @@ function updateHighlight() {
 }
 
 document.addEventListener('selectionchange', function() {
+  // With the Markdown pane focused, a rendered selection left behind is not the
+  // user's; focus events alone are not enough, as they wait for the window to be active.
+  if (document.activeElement === editor) { if (current || highlightTimer) clearHighlight(); return; }
   var s = window.getSelection();
   if (!s || !s.anchorNode || !inPreview(s.anchorNode)) return;
   if (highlightTimer) clearTimeout(highlightTimer);
@@ -1548,6 +1553,112 @@ editor.addEventListener('scroll', function() {
 window.addEventListener('resize', function() {
   updateHighlight();
 });
+
+// ---------------------------------------------------------------- rendered highlight
+
+// The other direction: a selection or caret in the Markdown pane marks the rendered
+// text behind it. The mark is a CSS custom highlight, so it adds nothing to the
+// editable DOM and leaves the rendered selection alone.
+var previewMark = null;   // {s, e, kind, ranges}
+var previewTimer = null;
+var canHighlight = !!(window.CSS && CSS.highlights && window.Highlight);
+
+function clearPreviewHighlight() {
+  if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
+  previewMark = null;
+  if (canHighlight) CSS.highlights.delete('tinymd-src');
+}
+
+// renderedRanges is the rendered text behind source [s, e): in each block, from the
+// first to the last character whose source lies inside it.
+function renderedRanges(s, e) {
+  var out = [];
+  for (var b = 0; b < blocks.length; b++) {
+    var B = blocks[b];
+    if (B.end <= s || B.start >= e) continue;
+    var m = blockMap(B).map, first = -1, last = -1;
+    for (var i = 0; i < m.length; i++) {
+      if (m[i] >= s && m[i] < e) { if (first < 0) first = i; last = i; }
+    }
+    if (first < 0) continue;
+    var a = pointAt(b, first), c = pointAt(b, last + 1), r = document.createRange();
+    try { r.setStart(a.node, a.off); r.setEnd(c.node, c.off); } catch (err) { continue; }
+    out.push(r);
+  }
+  return out;
+}
+
+function blockRange(b) {
+  var r = document.createRange();
+  r.selectNodeContents(blocks[b].el);
+  return r;
+}
+
+// sourceMark works out what to mark for the Markdown selection: the mapped text of
+// the selection, or of the caret's line; failing that, the blocks it touches, or
+// for a caret between blocks the block just before it.
+function sourceMark() {
+  var v = editor.value, s = editor.selectionStart, e = editor.selectionEnd, kind = 'range';
+  if (s === e) {
+    s = lineStartOf(v, s);
+    e = lineEndOf(v, e);
+    kind = 'caret';
+  }
+  var ranges = renderedRanges(s, e);
+  if (!ranges.length) {
+    kind = 'block';
+    for (var b = 0; b < blocks.length; b++) {
+      var B = blocks[b];
+      if (B.start < Math.max(e, s + 1) && B.end > s) ranges.push(blockRange(b));
+    }
+    if (!ranges.length) {
+      for (b = blocks.length - 1; b >= 0; b--) if (blocks[b].start <= s) break;
+      if (b < 0 && blocks.length) b = 0;
+      if (b >= 0) ranges.push(blockRange(b));
+    }
+  }
+  return { s: s, e: e, kind: kind, ranges: ranges };
+}
+
+function updatePreviewHighlight() {
+  if (!canHighlight || view !== 'split' || !useMarked || document.activeElement !== editor || !blocks.length) {
+    clearPreviewHighlight();
+    return;
+  }
+  var mark = sourceMark();
+  if (!mark.ranges.length) { clearPreviewHighlight(); return; }
+  previewMark = mark;
+  var hl = new Highlight();
+  mark.ranges.forEach(function(r) { hl.add(r); });
+  CSS.highlights.set('tinymd-src', hl);
+  // Scroll only when the mark is out of view, so reading the rendered pane is not
+  // fought while the caret moves within what it already shows.
+  var box = mark.ranges[0].getBoundingClientRect();
+  if (!box.width && !box.height) box = elementOf(mark.ranges[0].startContainer).getBoundingClientRect();
+  var pane = preview.getBoundingClientRect();
+  if (box.top < pane.top || box.bottom > pane.bottom) {
+    preview.scrollTop = Math.max(0, preview.scrollTop + box.top - pane.top - preview.clientHeight / 3);
+  }
+}
+
+function schedulePreviewHighlight() {
+  if (previewTimer) clearTimeout(previewTimer);
+  previewTimer = setTimeout(function() {
+    previewTimer = null;
+    updatePreviewHighlight();
+  }, 50);
+}
+
+document.addEventListener('selectionchange', function() {
+  if (document.activeElement === editor) schedulePreviewHighlight();
+  else if (previewMark || previewTimer) clearPreviewHighlight();
+});
+editor.addEventListener('selectionchange', schedulePreviewHighlight);
+['select', 'keyup', 'mouseup', 'focus'].forEach(function(t) {
+  editor.addEventListener(t, schedulePreviewHighlight);
+});
+preview.addEventListener('focus', clearPreviewHighlight);
+preview.addEventListener('mousedown', clearPreviewHighlight);
 
 // ---------------------------------------------------------------- divider
 
@@ -1689,6 +1800,15 @@ window.tinyMdTest = {
       highlightTimer = null;
     }
     updateHighlight();
+  },
+  canHighlight: function() { return canHighlight; },
+  previewHighlight: function() {
+    if (!previewMark || !CSS.highlights.has('tinymd-src')) return null;
+    return {
+      s: previewMark.s, e: previewMark.e, kind: previewMark.kind,
+      texts: previewMark.ranges.map(function(r) { return r.toString(); }),
+      boxes: previewMark.ranges.map(function(r) { var b = r.getBoundingClientRect(); return { top: b.top, bottom: b.bottom }; }),
+    };
   },
   markBox: function() {
     var m = document.querySelector('#editorHighlight mark');
