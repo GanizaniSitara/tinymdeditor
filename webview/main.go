@@ -11,7 +11,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -447,6 +449,144 @@ func utf16From(s string) []uint16 {
 	return r
 }
 
+func isDriveLetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func appendLinkLog(logPath, line string) {
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.WriteString(line + "\n")
+}
+
+// openLink sends a link clicked in the rendered pane to the default browser, or
+// opens a linked Markdown file in a new TinyMD window. Anything else is refused,
+// so a click can never replace the document. With TINYMD_LINK_LOG set it only
+// records what it would have opened, for the self-test.
+func openLink(href string) string {
+	href = strings.TrimSpace(href)
+	if href == "" {
+		return "blocked"
+	}
+
+	lower := strings.ToLower(href)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "mailto:") {
+		if logPath := os.Getenv("TINYMD_LINK_LOG"); logPath != "" {
+			appendLinkLog(logPath, "open "+href)
+			return "opened"
+		}
+		verb := utf16From("open")
+		target := utf16From(href)
+		shellExecuteW.Call(
+			mainHwnd,
+			uintptr(unsafe.Pointer(&verb[0])),
+			uintptr(unsafe.Pointer(&target[0])),
+			0,
+			0,
+			1,
+		)
+		return "opened"
+	}
+
+	if colon := strings.Index(href, ":"); colon >= 0 {
+		slash := strings.IndexAny(href, "/\\")
+		if slash < 0 || slash > colon {
+			scheme := lower[:colon]
+			if scheme == "file" {
+				// Handled below as local path.
+			} else if colon == 1 && isDriveLetter(href[0]) {
+				// Windows drive letter (e.g. C:\path or C:/path).
+			} else {
+				return "blocked"
+			}
+		}
+	}
+
+	pathStr := href
+	if strings.HasPrefix(lower, "file:") {
+		pathStr = pathStr[5:]
+	}
+
+	if idx := strings.IndexAny(pathStr, "#?"); idx >= 0 {
+		pathStr = pathStr[:idx]
+	}
+	if pathStr == "" {
+		return "blocked"
+	}
+
+	unescaped, err := url.PathUnescape(pathStr)
+	if err != nil {
+		return "blocked"
+	}
+	pathStr = unescaped
+
+	if strings.HasPrefix(strings.ToLower(pathStr), "//localhost/") {
+		pathStr = pathStr[len("//localhost/"):]
+	}
+	if strings.HasPrefix(pathStr, "///") {
+		pathStr = pathStr[2:]
+	}
+	if len(pathStr) >= 3 && (pathStr[0] == '/' || pathStr[0] == '\\') && isDriveLetter(pathStr[1]) && pathStr[2] == ':' {
+		pathStr = pathStr[1:]
+	} else if len(pathStr) >= 4 && (pathStr[0] == '/' || pathStr[0] == '\\') && (pathStr[1] == '/' || pathStr[1] == '\\') && isDriveLetter(pathStr[2]) && pathStr[3] == ':' {
+		pathStr = pathStr[2:]
+	}
+
+	pathStr = filepath.FromSlash(pathStr)
+	if pathStr == "" {
+		return "blocked"
+	}
+
+	var targetPath string
+	if filepath.IsAbs(pathStr) {
+		targetPath = pathStr
+	} else {
+		baseDir := ""
+		if currentFile != "" {
+			baseDir = filepath.Dir(currentFile)
+		} else {
+			baseDir, _ = os.Getwd()
+		}
+		targetPath = filepath.Join(baseDir, pathStr)
+	}
+
+	absPath, err := filepath.Abs(targetPath)
+	if err != nil {
+		return "blocked"
+	}
+
+	fi, err := os.Stat(absPath)
+	if err != nil {
+		return "not found"
+	}
+	if !fi.Mode().IsRegular() {
+		return "blocked"
+	}
+
+	ext := strings.ToLower(filepath.Ext(absPath))
+	if ext != ".md" && ext != ".markdown" {
+		return "blocked"
+	}
+
+	if logPath := os.Getenv("TINYMD_LINK_LOG"); logPath != "" {
+		appendLinkLog(logPath, "tinymd "+absPath)
+		return "opened"
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return "blocked"
+	}
+	cmd := exec.Command(exe, absPath)
+	if err := cmd.Start(); err != nil {
+		return "blocked"
+	}
+	return "opened"
+}
+
 // splashTitle is set before showSplash and used by the WndProc to paint text.
 var splashTitle string
 
@@ -763,6 +903,8 @@ func main() {
 		}
 		return "no file"
 	})
+
+	w.Bind("goOpenLink", openLink)
 
 	var tree string
 	if browseRoot != "" {

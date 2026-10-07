@@ -539,13 +539,229 @@ window.addEventListener('DOMContentLoaded', function() {
     runNext();
   }
 
+  // Link Ctrl+click and navigation checks. Stubs replace the native bridge functions
+  // and are restored afterwards.
+  function linkChecks(done) {
+    var origGoOpenLink = window.goOpenLink;
+    var origOpen = window.open;
+
+    function restore() {
+      window.goOpenLink = origGoOpenLink;
+      window.open = origOpen;
+      document.body.classList.remove('ctrl-down');
+    }
+
+    function runStep(name, fn, next) {
+      try {
+        fn(function(detail) {
+          try {
+            results.push({ name: name, ok: detail === true, detail: detail === true ? '' : String(detail) });
+          } finally {
+            restore();
+            next();
+          }
+        });
+      } catch (e) {
+        try {
+          results.push({ name: name, ok: false, detail: String(e && e.stack || e) });
+        } finally {
+          restore();
+          next();
+        }
+      }
+    }
+
+    var doc = '# Title\n\nSee [site](https://example.com/a) and [doc](other.md) and [top](#title).\n';
+
+    function findLink(preview, href) {
+      var a = preview.querySelector('a[href="' + href + '"]');
+      if (a) return a;
+      var all = preview.querySelectorAll('a');
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].getAttribute('href') === href) return all[i];
+      }
+      return null;
+    }
+
+    var tests = [
+      function(next) {
+        runStep('Ctrl+click on the site link opens URL and prevents default', function(cb) {
+          load(doc);
+          T().setPane('preview');
+          var preview = document.getElementById('preview');
+          var a = findLink(preview, 'https://example.com/a');
+          if (!a) return cb('link https://example.com/a not found in #preview');
+          var opened = [];
+          window.goOpenLink = function(href) { opened.push(href); return 'opened'; };
+          var ev = new MouseEvent('click', { ctrlKey: true, bubbles: true, cancelable: true });
+          a.dispatchEvent(ev);
+          setTimeout(function() {
+            try {
+              if (!ev.defaultPrevented) {
+                return cb('event default was not prevented' + (opened.length ? ', stub received: ' + JSON.stringify(opened) : ''));
+              }
+              if (opened.length !== 1 || opened[0] !== 'https://example.com/a') {
+                return cb('stub received ' + JSON.stringify(opened) + ' want ["https://example.com/a"]');
+              }
+              cb(true);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      },
+      function(next) {
+        runStep('plain click on the site link does not open and prevents default', function(cb) {
+          load(doc);
+          T().setPane('preview');
+          var preview = document.getElementById('preview');
+          var a = findLink(preview, 'https://example.com/a');
+          if (!a) return cb('link https://example.com/a not found in #preview');
+          var opened = [];
+          window.goOpenLink = function(href) { opened.push(href); return 'opened'; };
+          var ev = new MouseEvent('click', { ctrlKey: false, bubbles: true, cancelable: true });
+          a.dispatchEvent(ev);
+          setTimeout(function() {
+            try {
+              if (!ev.defaultPrevented) {
+                return cb('event default was not prevented' + (opened.length ? ', stub received: ' + JSON.stringify(opened) : ''));
+              }
+              if (opened.length !== 0) {
+                return cb('stub was called unexpectedly with: ' + JSON.stringify(opened));
+              }
+              cb(true);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      },
+      function(next) {
+        runStep('Ctrl+click on the #title link does not call goOpenLink', function(cb) {
+          load(doc);
+          T().setPane('preview');
+          var preview = document.getElementById('preview');
+          var a = findLink(preview, '#title');
+          if (!a) return cb('link #title not found in #preview');
+          var opened = [];
+          window.goOpenLink = function(href) { opened.push(href); return 'opened'; };
+          var ev = new MouseEvent('click', { ctrlKey: true, bubbles: true, cancelable: true });
+          a.dispatchEvent(ev);
+          setTimeout(function() {
+            try {
+              if (opened.length !== 0) {
+                return cb('stub was called unexpectedly for #title with: ' + JSON.stringify(opened));
+              }
+              cb(true);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      },
+      function(next) {
+        runStep('every preview link has a title starting with Ctrl+click to open', function(cb) {
+          load(doc);
+          T().setPane('preview');
+          setTimeout(function() {
+            try {
+              var preview = document.getElementById('preview');
+              var links = preview.querySelectorAll('a[href]');
+              if (!links || links.length === 0) {
+                return cb('no a[href] links found in #preview');
+              }
+              for (var i = 0; i < links.length; i++) {
+                var a = links[i];
+                var title = a.getAttribute('title') || a.title || '';
+                var prefix = 'Ctrl+click to open';
+                if (title.indexOf(prefix) !== 0) {
+                  return cb('link ' + i + ' (' + (a.getAttribute('href') || '') + ') title was ' + JSON.stringify(title) + ' want prefix ' + JSON.stringify(prefix));
+                }
+              }
+              cb(true);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      },
+      function(next) {
+        runStep('window.open returns null', function(cb) {
+          setTimeout(function() {
+            try {
+              var res = window.open('https://example.com');
+              if (res !== null) {
+                return cb('window.open returned ' + JSON.stringify(res) + ' want null');
+              }
+              cb(true);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      },
+      function(next) {
+        runStep('Control keydown adds ctrl-down to body and keyup removes it', function(cb) {
+          document.body.classList.remove('ctrl-down');
+          var kd = new KeyboardEvent('keydown', { key: 'Control', ctrlKey: true, bubbles: true, cancelable: true });
+          document.dispatchEvent(kd);
+          setTimeout(function() {
+            try {
+              if (!document.body.classList.contains('ctrl-down')) {
+                return cb('body does not have ctrl-down class after Control keydown');
+              }
+              var ku = new KeyboardEvent('keyup', { key: 'Control', ctrlKey: false, bubbles: true, cancelable: true });
+              document.dispatchEvent(ku);
+              setTimeout(function() {
+                try {
+                  if (document.body.classList.contains('ctrl-down')) {
+                    return cb('body still has ctrl-down class after Control keyup');
+                  }
+                  cb(true);
+                } catch (e) { cb(e); }
+              }, 50);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      },
+      function(next) {
+        runStep('plain click leaves document source unchanged', function(cb) {
+          load(doc);
+          T().setPane('preview');
+          var preview = document.getElementById('preview');
+          var a = findLink(preview, 'https://example.com/a');
+          if (!a) return cb('link https://example.com/a not found in #preview');
+          var before = T().source();
+          var ev = new MouseEvent('click', { ctrlKey: false, bubbles: true, cancelable: true });
+          a.dispatchEvent(ev);
+          setTimeout(function() {
+            try {
+              var after = T().source();
+              if (after !== before) {
+                return cb('source changed: got ' + JSON.stringify(after) + ' want ' + JSON.stringify(before));
+              }
+              cb(true);
+            } catch (e) { cb(e); }
+          }, 50);
+        }, next);
+      }
+    ];
+
+    var idx = 0;
+    function runNext() {
+      if (idx >= tests.length) {
+        try {
+          restore();
+        } finally {
+          done();
+        }
+        return;
+      }
+      var test = tests[idx++];
+      test(runNext);
+    }
+    runNext();
+  }
+
   (function wait(tries) {
     if (window.tinyMdTest && window.tinyMdTest.ready()) {
       try { run(); } catch (e) { results.push({ name: 'harness', ok: false, detail: String(e) }); }
       keyboardSearch(function() {
         clipboardChecks(function() {
-          var failed = results.filter(function(r) { return !r.ok; }).length;
-          goSelftestDone(JSON.stringify({ passed: results.length - failed, failed: failed, errors: selftestErrors, results: results }, null, 1));
+          linkChecks(function() {
+            var failed = results.filter(function(r) { return !r.ok; }).length;
+            goSelftestDone(JSON.stringify({ passed: results.length - failed, failed: failed, errors: selftestErrors, results: results }, null, 1));
+          });
         });
       });
       return;

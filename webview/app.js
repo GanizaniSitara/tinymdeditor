@@ -78,6 +78,10 @@ function render() {
   // Only edit when the tokens account for every byte; otherwise offsets could drift.
   if (pos !== text.length) ok = false;
   preview.innerHTML = html.join('');
+  // Links open with Ctrl+click; a plain click places the caret for editing.
+  preview.querySelectorAll('a[href]').forEach(function(a) {
+    a.title = 'Ctrl+click to open ' + a.getAttribute('href');
+  });
   for (var b = 0; b < blocks.length; b++) blocks[b].el = preview.children[b];
   // An empty list item cannot hold a caret until it has something in it.
   preview.querySelectorAll('li:empty').forEach(function(li) { li.appendChild(document.createElement('br')); });
@@ -1256,6 +1260,91 @@ preview.addEventListener('click', function(e) {
   var a = e.target.closest && e.target.closest('a');
   if (!a) return;
   e.preventDefault();
+  if (!e.ctrlKey || e.altKey || e.metaKey) return;
+
+  var href = a.getAttribute('href');
+  if (href === null) return;
+
+  if (href.charAt(0) === '#') {
+    var target = href.slice(1).toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9\-_]/g, '');
+    if (target) {
+      var headings = preview.querySelectorAll('h1, h2, h3, h4, h5, h6');
+      for (var i = 0; i < headings.length; i++) {
+        var h = headings[i];
+        var slug = (h.textContent || '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9\-_]/g, '');
+        if (slug === target) {
+          h.scrollIntoView();
+          break;
+        }
+      }
+    }
+    return;
+  }
+
+  var fn = window.goOpenLink;
+  if (typeof fn === 'function') {
+    var handleRes = function(res) {
+      if (res && res !== 'opened') {
+        var msg = res === 'blocked' ? 'Link blocked' :
+                  res === 'not found' ? 'File not found' : res;
+        flashStatus(msg);
+      }
+    };
+    try {
+      var res = fn(href);
+      if (res && typeof res.then === 'function') {
+        res.then(handleRes);
+      } else {
+        handleRes(res);
+      }
+    } catch (_) {}
+  }
+});
+
+window.open = function() { return null; };
+
+document.addEventListener('auxclick', function(e) {
+  var a = e.target.closest && e.target.closest('a');
+  if (a) e.preventDefault();
+}, true);
+
+document.addEventListener('click', function(e) {
+  var a = e.target.closest && e.target.closest('a');
+  if (a && !preview.contains(a)) {
+    e.preventDefault();
+  }
+}, true);
+
+function dragHasFiles(e) {
+  var dt = e.dataTransfer;
+  if (!dt || !dt.types) return false;
+  var types = dt.types;
+  if (typeof types.indexOf === 'function') return types.indexOf('Files') !== -1;
+  if (typeof types.contains === 'function') return types.contains('Files');
+  for (var i = 0; i < types.length; i++) {
+    if (types[i] === 'Files') return true;
+  }
+  return false;
+}
+
+document.addEventListener('dragover', function(e) {
+  if (dragHasFiles(e)) e.preventDefault();
+});
+
+document.addEventListener('drop', function(e) {
+  if (dragHasFiles(e)) e.preventDefault();
+});
+
+document.addEventListener('keydown', function(e) {
+  document.body.classList.toggle('ctrl-down', !!e.ctrlKey);
+}, true);
+
+document.addEventListener('keyup', function(e) {
+  document.body.classList.toggle('ctrl-down', !!e.ctrlKey);
+}, true);
+
+window.addEventListener('blur', function() {
+  document.body.classList.remove('ctrl-down');
 });
 
 // ---------------------------------------------------------------- source pane
