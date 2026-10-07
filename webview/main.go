@@ -668,7 +668,7 @@ func main() {
 
 	// Bind Go functions for JS to call
 	w.Bind("goReadClipboard", func() map[string]string {
-		text, err := readClipboardText(getHWND())
+		text, err := readClipboardText(mainHwnd)
 		if err != nil {
 			return map[string]string{"error": err.Error()}
 		}
@@ -676,7 +676,7 @@ func main() {
 	})
 
 	w.Bind("goWriteClipboard", func(text string) string {
-		if err := writeClipboardText(getHWND(), text); err != nil {
+		if err := writeClipboardText(mainHwnd, text); err != nil {
 			return "error: " + err.Error()
 		}
 		return "ok"

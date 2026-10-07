@@ -1146,10 +1146,34 @@ var SHORTCUTS = {
 
 document.addEventListener('keydown', async function(e) {
   if (e.key === 'F3') { e.preventDefault(); findNext(); return; }
+  if (e.key === 'Insert' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    handleEditorShortcut('v', true);
+    return;
+  }
   if (!e.ctrlKey || e.altKey || e.metaKey) return;
   var key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   if (e.shiftKey && /^[a-z]$/.test(key)) key = key.toUpperCase();
   if (key === 'C') { e.preventDefault(); if (typeof goCopyPath === 'function') flashStatus(await goCopyPath()); return; }
+  if (!e.shiftKey && (key === 'c' || key === 'Insert')) {
+    var hasSelection = false;
+    var active = document.activeElement;
+    if (active && active.id === 'askInput') {
+      hasSelection = active.selectionStart !== active.selectionEnd;
+    } else if (lastPane === 'preview' && view !== 'source') {
+      var sel = window.getSelection();
+      hasSelection = !!(sel && sel.toString());
+    } else {
+      hasSelection = !!selectedEditorText();
+    }
+    if (hasSelection) {
+      e.preventDefault();
+      e.stopPropagation();
+      handleEditorShortcut('c', true);
+    }
+    return;
+  }
   var name = SHORTCUTS[key];
   if (!name) return;
   if (document.activeElement && document.activeElement.id === 'askInput' && (name === 'undo' || name === 'redo')) return;
@@ -1245,9 +1269,10 @@ editor.addEventListener('input', function(e) {
 
 editor.addEventListener('copy', function(e) {
   var text = selectedEditorText();
-  if (!text || !e.clipboardData) return;
-  e.clipboardData.setData('text/plain', text);
+  if (!text) return;
+  if (e.clipboardData) e.clipboardData.setData('text/plain', text);
   e.preventDefault();
+  writeClipboard(text);
 });
 
 editor.addEventListener('paste', function(e) {
