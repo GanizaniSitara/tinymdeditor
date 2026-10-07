@@ -55,12 +55,28 @@ html, body { height:100%; overflow:hidden; font-family: Arial, Helvetica, sans-s
 .tree-pane .caret { display:inline-block; width:12px; color:#888; }
 
 .editor-pane {
+  position:relative;
   flex:1 1 50%; min-width:0; height:100%; display:flex; flex-direction:column;
   overflow:hidden;
 }
+.editor-highlight {
+  position:absolute; top:0; left:0; bottom:0;
+  overflow:hidden; pointer-events:none; z-index:0;
+  padding:12px 14px; font-size:calc(14px * var(--z));
+  font-family: 'Cascadia Code','Consolas','Courier New', monospace;
+  line-height:1.6; tab-size:4;
+  white-space:pre-wrap; overflow-wrap:break-word; word-wrap:break-word;
+  color:transparent; background:#fff;
+}
+.editor-highlight mark {
+  background:#fff1a8;
+  color:transparent;
+  border-radius:2px;
+}
 .editor-pane textarea {
+  position:relative; z-index:1;
   flex:1; resize:none; border:none; outline:none;
-  background:#fff; color:#222; padding:12px 14px; font-size:calc(14px * var(--z));
+  background:transparent; color:#222; padding:12px 14px; font-size:calc(14px * var(--z));
   font-family: 'Cascadia Code','Consolas','Courier New', monospace;
   line-height:1.6; tab-size:4;
 }
@@ -127,6 +143,7 @@ body.ctrl-down .preview-pane a { cursor: pointer; }
 /* Print: show only the formatted preview */
 @media print {
   .toolbar, .editor-pane, .divider, .tree-pane { display:none !important; }
+  .editor-highlight { display:none !important; }
   .container { display:block !important; height:auto !important; }
   .preview-pane {
     display:block !important; flex:none !important; width:100% !important; height:auto !important;
@@ -158,6 +175,7 @@ body.ctrl-down .preview-pane a { cursor: pointer; }
 <div class="container" id="container">
   <div class="tree-pane hidden" id="tree"></div>
   <div class="editor-pane">
+    <div id="editorHighlight" class="editor-highlight" aria-hidden="true"></div>
     <textarea id="editor" spellcheck="false" placeholder="Type your Markdown here..."></textarea>
   </div>
   <div class="divider" id="divider"></div>

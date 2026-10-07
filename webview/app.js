@@ -16,6 +16,7 @@ var savedEl = document.getElementById('saved');
 var fnameEl = document.getElementById('fname');
 var editorPane = document.querySelector('.editor-pane');
 var previewPane = preview;
+var editorHighlight = document.getElementById('editorHighlight');
 
 var useMarked = false;
 var editable = false;      // the rendered pane accepts edits (marked loaded, offsets verified)
@@ -842,6 +843,7 @@ function applyView(next, focus) {
   if (view === 'source') lastPane = 'editor';
   if (focus !== false) focusPane();
   saveSettings();
+  updateHighlight();
 }
 
 function focusPane() {
@@ -868,6 +870,7 @@ function setZoom(z) {
   zoom = Math.max(0.6, Math.min(3, Math.round(z * 10) / 10));
   document.documentElement.style.setProperty('--z', zoom);
   saveSettings();
+  updateHighlight();
 }
 
 function setWide(on) {
@@ -904,6 +907,7 @@ function markSaved() {
 }
 
 function loadDocument(content, name) {
+  clearHighlight();
   editor.value = content;
   if (name !== undefined) fnameEl.textContent = name;
   render();
@@ -917,6 +921,7 @@ function loadDocument(content, name) {
     try { window.getSelection().setBaseAndExtent(p.node, p.off, p.node, p.off); } catch (e) {}
   }
   focusPane();
+  clearHighlight();
 }
 
 // confirmDiscard offers to save unsaved changes; false means stay put.
@@ -1350,6 +1355,7 @@ window.addEventListener('blur', function() {
 // ---------------------------------------------------------------- source pane
 
 editor.addEventListener('input', function(e) {
+  clearHighlight();
   var kind = e.inputType === 'insertText' ? 'type' : 'edit';
   record(editor.value, editor.selectionEnd, editor.selectionStart, editor.selectionStart, kind);
   render();
@@ -1379,13 +1385,169 @@ editor.addEventListener('keydown', function(e) {
   }
 });
 
-editor.addEventListener('focus', function() { lastPane = 'editor'; });
+editor.addEventListener('focus', function() {
+  lastPane = 'editor';
+  clearHighlight();
+});
 preview.addEventListener('focus', function() { lastPane = 'preview'; });
 editorPane.addEventListener('mousedown', function(e) {
   lastPane = 'editor';
   if (e.target !== editor) editor.focus();
 });
 preview.addEventListener('mousedown', function() { lastPane = 'preview'; });
+
+// ---------------------------------------------------------------- highlight backdrop
+
+var current = null;
+var highlightTimer = null;
+
+function inPreview(node) {
+  if (!node) return false;
+  return node === preview || (preview.contains && preview.contains(node));
+}
+
+function esc(s) {
+  return (s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function clearHighlight() {
+  if (highlightTimer) {
+    clearTimeout(highlightTimer);
+    highlightTimer = null;
+  }
+  current = null;
+  if (editorHighlight) editorHighlight.innerHTML = '';
+}
+
+function drawHighlight(s, e, kind) {
+  var src = editor.value;
+  s = Math.max(0, Math.min(s, src.length));
+  e = Math.max(s, Math.min(e, src.length));
+  current = { s: s, e: e, kind: kind };
+  if (!editorHighlight) return;
+  editorHighlight.style.width = editor.clientWidth + 'px';
+  var markText = (s === e) ? ' ' : esc(src.slice(s, e));
+  editorHighlight.innerHTML = esc(src.slice(0, s)) + '<mark>' + markText + '</mark>' + esc(src.slice(e)) + '\n ';
+
+  if (editor.clientHeight > 0) {
+    var mark = editorHighlight.querySelector('mark');
+    if (mark) {
+      var markTop = mark.offsetTop;
+      var markHeight = mark.offsetHeight;
+      var viewTop = editor.scrollTop;
+      var viewBottom = viewTop + editor.clientHeight;
+      if (!(markTop >= viewTop && markTop + markHeight <= viewBottom)) {
+        editor.scrollTop = Math.max(0, markTop - editor.clientHeight / 3);
+      }
+    }
+  }
+  editorHighlight.scrollTop = editor.scrollTop;
+}
+
+// mappedSpan is the source from the first to the last character behind the rendered
+// text a..c. Unlike mappedRanges it does not widen to take in emphasis markers, so
+// selecting a bold word marks the word, not its asterisks.
+function mappedSpan(a, c) {
+  var s = -1, e = -1;
+  for (var b = a.b; b <= c.b && b < blocks.length; b++) {
+    var m = blockMap(blocks[b]).map, from = b === a.b ? a.i : 0, to = b === c.b ? c.i : m.length;
+    for (var i = from; i < to; i++) {
+      if (m[i] < 0) continue;
+      if (s < 0) s = m[i];
+      e = m[i] + 1;
+    }
+  }
+  return s < 0 ? null : { s: s, e: e };
+}
+
+function updateHighlight() {
+  if (editorHighlight) {
+    editorHighlight.style.width = editor.clientWidth + 'px';
+  }
+  var s = window.getSelection();
+  if (!s || !s.anchorNode || !inPreview(s.anchorNode)) {
+    if (current) {
+      drawHighlight(current.s, current.e, current.kind);
+    }
+    return;
+  }
+  if (!blocks || !blocks.length) {
+    clearHighlight();
+    return;
+  }
+  var sp = selPositions();
+  if (!sp || !sp.anchor || !sp.focus || sp.anchor.pending || sp.focus.pending) {
+    clearHighlight();
+    return;
+  }
+  if (sp.collapsed) {
+    if (sp.anchor.b === undefined || sp.anchor.b < 0 || sp.anchor.b >= blocks.length) {
+      clearHighlight();
+      return;
+    }
+    var c = srcAt(sp.anchor);
+    if (c < 0) {
+      c = blocks[sp.anchor.b].start;
+    }
+    if (c < 0) {
+      clearHighlight();
+      return;
+    }
+    var src = editor.value;
+    c = Math.max(0, Math.min(c, src.length));
+    var prev = src.lastIndexOf('\n', c - 1);
+    var start = prev >= 0 ? prev + 1 : 0;
+    var next = src.indexOf('\n', c);
+    var end = next >= 0 ? next : src.length;
+    drawHighlight(start, end, 'caret');
+  } else {
+    var o = ordered(sp);
+    if (!o || !o[0] || !o[1] || o[0].b === undefined || o[1].b === undefined ||
+        o[0].b < 0 || o[0].b >= blocks.length || o[1].b < 0 || o[1].b >= blocks.length) {
+      clearHighlight();
+      return;
+    }
+    var r = mappedSpan(o[0], o[1]);
+    var start, end, kind;
+    if (r) {
+      start = r.s;
+      end = r.e;
+      kind = 'range';
+    } else {
+      start = blocks[o[0].b].start;
+      end = blocks[o[1].b].end;
+      var src = editor.value;
+      while (end > start && (src.charAt(end - 1) === '\n' || src.charAt(end - 1) === '\r')) {
+        end--;
+      }
+      kind = 'block';
+    }
+    drawHighlight(start, end, kind);
+  }
+}
+
+document.addEventListener('selectionchange', function() {
+  var s = window.getSelection();
+  if (!s || !s.anchorNode || !inPreview(s.anchorNode)) return;
+  if (highlightTimer) clearTimeout(highlightTimer);
+  highlightTimer = setTimeout(function() {
+    highlightTimer = null;
+    updateHighlight();
+  }, 50);
+});
+
+editor.addEventListener('scroll', function() {
+  if (editorHighlight) {
+    editorHighlight.scrollTop = editor.scrollTop;
+  }
+});
+
+window.addEventListener('resize', function() {
+  updateHighlight();
+});
 
 // ---------------------------------------------------------------- divider
 
@@ -1396,6 +1558,7 @@ var splitPct = settings.split || 50;
   function apply() {
     editorPane.style.flexBasis = splitPct + '%';
     previewPane.style.flexBasis = (100 - splitPct) + '%';
+    updateHighlight();
   }
   apply();
   divider.addEventListener('mousedown', function(e) {
@@ -1519,5 +1682,17 @@ window.tinyMdTest = {
   deleteSelection: deleteSelection, undo: undo, redo: redo, commands: commands,
   findNext: function(t) { lastFind = t; return findNext(); },
   dirty: function() { return editor.value !== savedValue; },
+  highlight: function() { return current ? { s: current.s, e: current.e, kind: current.kind } : null; },
+  syncNow: function() {
+    if (highlightTimer) {
+      clearTimeout(highlightTimer);
+      highlightTimer = null;
+    }
+    updateHighlight();
+  },
+  markBox: function() {
+    var m = document.querySelector('#editorHighlight mark');
+    return m ? { top: m.offsetTop, height: m.offsetHeight } : null;
+  },
 };
 })();

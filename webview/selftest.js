@@ -753,14 +753,434 @@ window.addEventListener('DOMContentLoaded', function() {
     runNext();
   }
 
+  // Source highlighting and scroll sync checks.
+  function syncChecks(done) {
+    var ed = document.getElementById('editor');
+    var preview = document.getElementById('preview');
+
+    function delay(ms) {
+      return new Promise(function(resolve) { setTimeout(resolve, ms); });
+    }
+
+    async function shot(name) {
+      if (typeof window.goShot !== 'function') return;
+      try {
+        var res = await window.goShot(name);
+        if (res !== 'ok') {
+          results.push({ name: 'shot ' + name, ok: false, detail: 'got ' + JSON.stringify(res) + ' want "ok"' });
+        }
+      } catch (e) {
+        results.push({ name: 'shot ' + name, ok: false, detail: String(e && e.stack || e) });
+      }
+    }
+
+    function isMarkVisible() {
+      var b = T().markBox();
+      return !!(b && b.top >= ed.scrollTop - 1 && b.top + b.height <= ed.scrollTop + ed.clientHeight + 1);
+    }
+
+    var tests = [
+      {
+        name: 'sync: heading',
+        shot: 'heading',
+        fn: async function() {
+          load(sample);
+          preview.focus();
+          select('Title');
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null';
+          if (h.kind !== 'range') return 'kind got ' + JSON.stringify(h.kind) + ' want "range"';
+          var slice = T().source().slice(h.s, h.e);
+          if (slice !== 'Title') return 'slice got ' + JSON.stringify(slice) + ' want "Title"';
+          if (!isMarkVisible()) return 'mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          return true;
+        }
+      },
+      {
+        name: 'sync: emphasis',
+        shot: 'emphasis',
+        fn: async function() {
+          load(sample);
+          preview.focus();
+          select('bold');
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null';
+          var slice = T().source().slice(h.s, h.e);
+          if (slice !== 'bold') return 'slice got ' + JSON.stringify(slice) + ' want "bold"';
+          if (!isMarkVisible()) return 'mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          return true;
+        }
+      },
+      {
+        name: 'sync: link text',
+        shot: 'link-text',
+        fn: async function() {
+          load(sample);
+          preview.focus();
+          select('link');
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null';
+          var slice = T().source().slice(h.s, h.e);
+          if (slice !== 'link') return 'slice got ' + JSON.stringify(slice) + ' want "link"';
+          if (!isMarkVisible()) return 'mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          return true;
+        }
+      },
+      {
+        name: 'sync: inline code',
+        shot: 'inline-code',
+        fn: async function() {
+          load(sample);
+          preview.focus();
+          select('code');
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null';
+          var slice = T().source().slice(h.s, h.e);
+          if (slice !== 'code') return 'slice got ' + JSON.stringify(slice) + ' want "code"';
+          if (!isMarkVisible()) return 'mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          return true;
+        }
+      },
+      {
+        name: 'sync: list item',
+        shot: 'list-item',
+        fn: async function() {
+          load(sample);
+          preview.focus();
+          var bs = T().blocks();
+          var listIndex = -1;
+          for (var b = 0; b < bs.length; b++) {
+            if (bs[b].tok && bs[b].tok.type === 'list') {
+              listIndex = b;
+              break;
+            }
+          }
+          if (listIndex < 0) return 'list block not found in sample';
+          var m = T().blockMap(bs[listIndex]);
+          var i = m.text.indexOf('second');
+          if (i < 0) return '"second" not found in list block map text';
+          var a = T().pointAt(listIndex, i);
+          var c = T().pointAt(listIndex, i + 6);
+          window.getSelection().setBaseAndExtent(a.node, a.off, c.node, c.off);
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null';
+          var slice = T().source().slice(h.s, h.e);
+          if (slice !== 'second') return 'slice got ' + JSON.stringify(slice) + ' want "second"';
+          if (h.s < sample.indexOf('- second *item*')) return 'highlight offset (' + h.s + ') matched earlier occurrence';
+          if (!isMarkVisible()) return 'mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          return true;
+        }
+      },
+      {
+        name: 'sync: table cell',
+        shot: 'table-cell',
+        fn: async function() {
+          load(sample);
+          preview.focus();
+          select('alpha');
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null';
+          var slice = T().source().slice(h.s, h.e);
+          if (slice !== 'alpha') return 'slice got ' + JSON.stringify(slice) + ' want "alpha"';
+          if (!isMarkVisible()) return 'mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          return true;
+        }
+      },
+      {
+        name: 'sync: code block',
+        shot: 'code-block',
+        fn: async function() {
+          load('```go\nfunc main() {\n\tprintln("hi")\n}\n```\n');
+          preview.focus();
+          select('println');
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null';
+          var slice = T().source().slice(h.s, h.e);
+          if (slice !== 'println') return 'slice got ' + JSON.stringify(slice) + ' want "println"';
+          if (!isMarkVisible()) return 'mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          return true;
+        }
+      },
+      {
+        name: 'sync: quote',
+        shot: 'quote',
+        fn: async function() {
+          load(sample);
+          preview.focus();
+          select('quoted line two');
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null';
+          var slice = T().source().slice(h.s, h.e);
+          if (slice !== 'quoted line two') return 'slice got ' + JSON.stringify(slice) + ' want "quoted line two"';
+          if (!isMarkVisible()) return 'mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          return true;
+        }
+      },
+      {
+        name: 'sync: mid-element start/end',
+        shot: 'mid-element',
+        fn: async function() {
+          load(sample);
+          preview.focus();
+          select('ld text and a li');
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null';
+          var slice = T().source().slice(h.s, h.e);
+          if (slice.indexOf('ld') !== 0) return 'slice does not start with "ld": got ' + JSON.stringify(slice);
+          if (slice.slice(-2) !== 'li') return 'slice does not end with "li": got ' + JSON.stringify(slice);
+          if (slice.indexOf('** text and a [') < 0) return 'slice does not contain "** text and a [": got ' + JSON.stringify(slice);
+          if (!isMarkVisible()) return 'mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          return true;
+        }
+      },
+      {
+        name: 'sync: cross-block',
+        shot: 'cross-block',
+        fn: async function() {
+          load(sample);
+          preview.focus();
+          var a = locate('wrapped', 0);
+          var c = locate('first item', 'first item'.length);
+          window.getSelection().setBaseAndExtent(a.node, a.off, c.node, c.off);
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null';
+          var slice = T().source().slice(h.s, h.e);
+          if (slice.indexOf('wrapped') !== 0) return 'slice does not start with "wrapped": got ' + JSON.stringify(slice);
+          if (slice.slice(-10) !== 'first item') return 'slice does not end with "first item": got ' + JSON.stringify(slice);
+          if (slice.indexOf('\n\n- ') < 0) return 'slice does not contain "\\n\\n- ": got ' + JSON.stringify(slice);
+          if (!isMarkVisible()) return 'mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          return true;
+        }
+      },
+      {
+        name: 'sync: caret at line start',
+        shot: 'caret-start',
+        fn: async function() {
+          load(sample);
+          preview.focus();
+          place('first item', 0);
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null';
+          if (h.kind !== 'caret') return 'kind got ' + JSON.stringify(h.kind) + ' want "caret"';
+          var slice = T().source().slice(h.s, h.e);
+          if (slice !== '- first item') return 'slice got ' + JSON.stringify(slice) + ' want "- first item"';
+          if (!isMarkVisible()) return 'mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          return true;
+        }
+      },
+      {
+        name: 'sync: caret at line end',
+        shot: 'caret-end',
+        fn: async function() {
+          load(sample);
+          preview.focus();
+          place('quoted line one', 15);
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null';
+          if (h.kind !== 'caret') return 'kind got ' + JSON.stringify(h.kind) + ' want "caret"';
+          var slice = T().source().slice(h.s, h.e);
+          if (slice !== '> quoted line one') return 'slice got ' + JSON.stringify(slice) + ' want "> quoted line one"';
+          if (!isMarkVisible()) return 'mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          return true;
+        }
+      },
+      {
+        name: 'sync: long document',
+        shot: 'long-document',
+        fn: async function() {
+          var lines = [];
+          for (var i = 1; i <= 300; i++) lines.push('Paragraph ' + i + '.');
+          var longDoc = lines.join('\n\n') + '\n';
+          load(longDoc);
+          preview.focus();
+          select('Paragraph 280.');
+          await delay(150);
+          var h1 = T().highlight();
+          if (!h1) return 'Paragraph 280 highlight is null';
+          var s1 = T().source().slice(h1.s, h1.e);
+          if (s1 !== 'Paragraph 280.') return 'Paragraph 280 slice got ' + JSON.stringify(s1) + ' want "Paragraph 280."';
+          if (!isMarkVisible()) return 'Paragraph 280 mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          var st1 = ed.scrollTop;
+          if (st1 <= 0) return 'Paragraph 280 expected ed.scrollTop > 0, got ' + st1;
+          // The rendered pane is scrolled to the selection too, so the shot shows both.
+          locate('Paragraph 280.', 0).node.parentNode.scrollIntoView({ block: 'center' });
+          await shot('long-document-scrolled-down');
+
+          select('Paragraph 3.');
+          await delay(150);
+          var h2 = T().highlight();
+          if (!h2) return 'Paragraph 3 highlight is null';
+          var s2 = T().source().slice(h2.s, h2.e);
+          if (s2 !== 'Paragraph 3.') return 'Paragraph 3 slice got ' + JSON.stringify(s2) + ' want "Paragraph 3."';
+          if (!isMarkVisible()) return 'Paragraph 3 mark not visible: box=' + JSON.stringify(T().markBox()) + ' scrollTop=' + ed.scrollTop + ' clientHeight=' + ed.clientHeight;
+          var st2 = ed.scrollTop;
+          if (st2 >= st1) return 'Paragraph 3 expected ed.scrollTop < ' + st1 + ', got ' + st2;
+          return true;
+        }
+      },
+      {
+        name: 'sync: no fighting the user',
+        shot: 'no-fighting',
+        fn: async function() {
+          var lines = [];
+          for (var i = 1; i <= 300; i++) lines.push('Paragraph ' + i + '.');
+          var longDoc = lines.join('\n\n') + '\n';
+          load(longDoc);
+          preview.focus();
+          select('Paragraph 150.');
+          await delay(150);
+          var stBefore = ed.scrollTop;
+          select('Paragraph 151.');
+          await delay(150);
+          var stAfter = ed.scrollTop;
+          if (stAfter !== stBefore) return 'ed.scrollTop changed from ' + stBefore + ' to ' + stAfter;
+          var h = T().highlight();
+          if (!h) return 'Paragraph 151 highlight is null';
+          var s = T().source().slice(h.s, h.e);
+          if (s !== 'Paragraph 151.') return 'Paragraph 151 slice got ' + JSON.stringify(s) + ' want "Paragraph 151."';
+          if (!isMarkVisible()) return 'Paragraph 151 mark not visible';
+          return true;
+        }
+      },
+      {
+        name: 'sync: no focus or selection stealing',
+        shot: 'no-stealing',
+        fn: async function() {
+          load(sample);
+          ed.focus();
+          ed.setSelectionRange(5, 12);
+          var startBefore = ed.selectionStart;
+          var endBefore = ed.selectionEnd;
+          preview.focus();
+          select('bold');
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null';
+          if (document.activeElement !== preview) return 'activeElement is ' + (document.activeElement ? document.activeElement.id || document.activeElement.tagName : 'null') + ' want #preview';
+          if (ed.selectionStart !== startBefore || ed.selectionEnd !== endBefore) {
+            return 'editor selection changed: got ' + ed.selectionStart + '-' + ed.selectionEnd + ' want ' + startBefore + '-' + endBefore;
+          }
+          return true;
+        }
+      },
+      {
+        name: 'sync: typing still works',
+        shot: 'typing',
+        fn: async function() {
+          load(sample);
+          preview.focus();
+          place('bold', 2);
+          T().typeText('XY');
+          var src = T().source();
+          if (src.indexOf('**boXYld**') < 0) return 'source missing "**boXYld**": got ' + JSON.stringify(src);
+          await delay(150);
+          var h = T().highlight();
+          if (!h) return 'highlight is null after typing';
+          if (h.kind !== 'caret') return 'highlight kind got ' + JSON.stringify(h.kind) + ' want "caret"';
+          var slice = src.slice(h.s, h.e);
+          if (slice.indexOf('boXYld') < 0) return 'highlight line got ' + JSON.stringify(slice) + ' want it to contain "boXYld"';
+          return true;
+        }
+      },
+      {
+        name: 'sync: edit after mapping',
+        shot: 'edit-after-mapping',
+        fn: async function() {
+          load('aaa\n\nbbb target\n');
+          preview.focus();
+          select('target');
+          await delay(150);
+          var h1 = T().highlight();
+          var src1 = T().source();
+          if (!h1 || src1.slice(h1.s, h1.e) !== 'target') return 'initial target highlight failed: ' + (h1 ? JSON.stringify(src1.slice(h1.s, h1.e)) : 'null');
+          place('aaa', 0);
+          T().typeText('PREFIX ');
+          select('target');
+          await delay(150);
+          var h2 = T().highlight();
+          var src2 = T().source();
+          if (!h2 || src2.slice(h2.s, h2.e) !== 'target') return 'post-edit target highlight failed: ' + (h2 ? JSON.stringify(src2.slice(h2.s, h2.e)) : 'null');
+          return true;
+        }
+      },
+      {
+        name: 'sync: editor focus clears',
+        fn: async function() {
+          load(sample);
+          preview.focus();
+          select('bold');
+          await delay(150);
+          if (!T().highlight()) return 'highlight not set before ed.focus()';
+          ed.focus();
+          await delay(150);
+          var h = T().highlight();
+          if (h !== null) return 'expected null highlight after ed.focus(), got ' + JSON.stringify(h);
+          return true;
+        }
+      },
+      {
+        name: 'sync: rendered-only view',
+        fn: async function() {
+          load(sample);
+          T().commands.viewRendered();
+          preview.focus();
+          select('bold');
+          await delay(150);
+          var h = T().highlight();
+          var src = T().source();
+          var ok = h && src.slice(h.s, h.e) === 'bold';
+          T().commands.split();
+          if (!ok) return 'rendered-only view highlight failed: got ' + (h ? JSON.stringify(src.slice(h.s, h.e)) : 'null');
+          return true;
+        }
+      }
+    ];
+
+    var idx = 0;
+    async function runNext() {
+      if (idx >= tests.length) {
+        done();
+        return;
+      }
+      var t = tests[idx++];
+      try {
+        T().commands.split();
+        var detail = await t.fn();
+        results.push({ name: t.name, ok: detail === true, detail: detail === true ? '' : String(detail) });
+        if (t.shot) await shot(t.shot);
+      } catch (e) {
+        results.push({ name: t.name, ok: false, detail: String(e && e.stack || e) });
+        if (t.shot) {
+          try { await shot(t.shot); } catch (_) {}
+        }
+      }
+      runNext();
+    }
+    runNext();
+  }
+
   (function wait(tries) {
     if (window.tinyMdTest && window.tinyMdTest.ready()) {
       try { run(); } catch (e) { results.push({ name: 'harness', ok: false, detail: String(e) }); }
       keyboardSearch(function() {
         clipboardChecks(function() {
           linkChecks(function() {
-            var failed = results.filter(function(r) { return !r.ok; }).length;
-            goSelftestDone(JSON.stringify({ passed: results.length - failed, failed: failed, errors: selftestErrors, results: results }, null, 1));
+            syncChecks(function() {
+              var failed = results.filter(function(r) { return !r.ok; }).length;
+              goSelftestDone(JSON.stringify({ passed: results.length - failed, failed: failed, errors: selftestErrors, results: results }, null, 1));
+            });
           });
         });
       });
