@@ -753,6 +753,179 @@ window.addEventListener('DOMContentLoaded', function() {
     runNext();
   }
 
+  // The reverse direction: a selection or caret in the Markdown pane marks the
+  // rendered text behind it and scrolls the rendered pane to it.
+  function reverseTests(ed, preview, delay, shot) {
+    // srcSelect focuses the Markdown pane and selects source [s, e), scrolling the
+    // textarea so the screenshot shows it.
+    async function srcSelect(s, e) {
+      ed.focus();
+      ed.setSelectionRange(s, e === undefined ? s : e);
+      var line = ed.value.slice(0, s).split('\n').length - 1, lines = ed.value.split('\n').length;
+      var y = ed.scrollHeight * line / lines;
+      if (y < ed.scrollTop || y > ed.scrollTop + ed.clientHeight - 30) ed.scrollTop = Math.max(0, y - ed.clientHeight / 3);
+      await delay(150);
+    }
+    async function srcText(text, from) {
+      var i = ed.value.indexOf(text, from || 0);
+      if (i < 0) throw new Error('"' + text + '" is not in the source');
+      await srcSelect(i, i + text.length);
+    }
+    function visible(h) {
+      var pane = preview.getBoundingClientRect(), b = h.boxes[0];
+      return b.top >= pane.top - 1 && b.bottom <= pane.bottom + 1;
+    }
+    function expect(kind, texts) {
+      var h = T().previewHighlight();
+      if (!h) return 'preview highlight is null';
+      if (kind && h.kind !== kind) return 'kind got ' + JSON.stringify(h.kind) + ' want ' + JSON.stringify(kind);
+      if (texts && JSON.stringify(h.texts) !== JSON.stringify(texts)) return 'texts got ' + JSON.stringify(h.texts) + ' want ' + JSON.stringify(texts);
+      if (!visible(h)) return 'mark not visible: ' + JSON.stringify(h.boxes[0]) + ' pane scrollTop=' + preview.scrollTop;
+      if (document.activeElement !== ed) return 'focus moved to ' + (document.activeElement && (document.activeElement.id || document.activeElement.tagName));
+      return true;
+    }
+    function longDoc() {
+      var lines = [];
+      for (var i = 1; i <= 300; i++) lines.push('Paragraph ' + i + '.');
+      return lines.join('\n\n') + '\n';
+    }
+    function simple(name, shot, doc, text, kind, texts) {
+      return { name: 'reverse: ' + name, shot: 'rev-' + shot, fn: async function() {
+        load(doc);
+        await srcText(text);
+        return expect(kind, texts);
+      } };
+    }
+    var code = '```go\nfunc main() {\n\tprintln("hi")\n}\n```\n';
+    return [
+      { name: 'reverse: highlight API available', fn: async function() {
+        return T().canHighlight() ? true : 'CSS custom highlights are not supported by this WebView2';
+      } },
+      simple('heading', 'heading', sample, 'Title', 'range', ['Title']),
+      simple('emphasis with its markers', 'emphasis', sample, '**bold**', 'range', ['bold']),
+      simple('link source', 'link', sample, '[link](http://example.com)', 'range', ['link']),
+      simple('inline code', 'inline-code', sample, '`code`', 'range', ['code']),
+      simple('list item', 'list-item', sample, 'second *item*', 'range', ['second item']),
+      simple('table cell', 'table-cell', sample, 'alpha', 'range', ['alpha']),
+      simple('code block', 'code-block', code, 'println', 'range', ['println']),
+      simple('quote', 'quote', sample, 'quoted line two', 'range', ['quoted line two']),
+      simple('ordered list', 'ordered-list', sample, '2. two', 'range', ['two']),
+      simple('mid-element start/end', 'mid-element', sample, 'ld** text and a [li', 'range', ['ld text and a li']),
+      { name: 'reverse: cross-block', shot: 'rev-cross-block', fn: async function() {
+        load(sample);
+        var s = sample.indexOf('wrapped'), e = sample.indexOf('first item') + 'first item'.length;
+        await srcSelect(s, e);
+        return expect('range', ['wrapped onto a second line with code.', 'first item']);
+      } },
+      { name: 'reverse: caret mid-line', shot: 'rev-caret-mid', fn: async function() {
+        load(sample);
+        await srcSelect(sample.indexOf('cond *item*'));
+        return expect('caret', ['second item']);
+      } },
+      { name: 'reverse: caret at line start', shot: 'rev-caret-start', fn: async function() {
+        load(sample);
+        await srcSelect(sample.indexOf('> quoted line one'));
+        return expect('caret', ['quoted line one']);
+      } },
+      { name: 'reverse: caret at line end', shot: 'rev-caret-end', fn: async function() {
+        load(sample);
+        var i = sample.indexOf('| beta 😀 | 2 |') + '| beta 😀 | 2 |'.length;
+        await srcSelect(i);
+        // The cells' rendered text is separated by the line break between them.
+        return expect('caret', ['beta 😀\n2']);
+      } },
+      { name: 'reverse: structure only falls back to the block', shot: 'rev-structure', fn: async function() {
+        load(sample);
+        await srcText('---\n');
+        var h = T().previewHighlight();
+        if (!h) return 'preview highlight is null';
+        if (h.kind !== 'block' || h.texts.length !== 1) return 'got ' + JSON.stringify(h) + ' want one block';
+        var r = expect('block', null);
+        if (r !== true) return r;
+        // A caret on the blank line after the code fence marks the block before it.
+        await srcSelect(sample.indexOf('```\n\n---') + 4);
+        h = T().previewHighlight();
+        if (!h || h.kind !== 'block' || h.texts[0].indexOf('println') < 0) return 'blank line got ' + JSON.stringify(h) + ' want the code block';
+        return true;
+      } },
+      { name: 'reverse: long document', shot: 'rev-long-document', fn: async function() {
+        var doc = longDoc();
+        load(doc);
+        await srcText('Paragraph 280.');
+        var r = expect('range', ['Paragraph 280.']);
+        if (r !== true) return 'Paragraph 280: ' + r;
+        var down = preview.scrollTop;
+        if (down <= 0) return 'rendered pane did not scroll down: scrollTop=' + down;
+        await shot('rev-long-document-scrolled-down');
+        await srcText('Paragraph 3.');
+        r = expect('range', ['Paragraph 3.']);
+        if (r !== true) return 'Paragraph 3: ' + r;
+        if (preview.scrollTop >= down) return 'rendered pane did not scroll back up: ' + preview.scrollTop + ' >= ' + down;
+        return true;
+      } },
+      { name: 'reverse: no fighting the user', shot: 'rev-no-fighting', fn: async function() {
+        load(longDoc());
+        await srcText('Paragraph 150.');
+        var before = preview.scrollTop;
+        await srcText('Paragraph 151.');
+        if (preview.scrollTop !== before) return 'rendered pane scrolled from ' + before + ' to ' + preview.scrollTop + ' for a mark already in view';
+        return expect('range', ['Paragraph 151.']);
+      } },
+      { name: 'reverse: no focus, selection or text changes', shot: 'rev-no-stealing', fn: async function() {
+        load(sample);
+        var src = T().source(), s = sample.indexOf('bold'), e = s + 4;
+        await srcSelect(s, e);
+        var r = expect('range', ['bold']);
+        if (r !== true) return r;
+        if (ed.selectionStart !== s || ed.selectionEnd !== e) return 'editor selection moved to ' + ed.selectionStart + '-' + ed.selectionEnd;
+        if (T().source() !== src) return 'source changed';
+        if (preview.querySelector('mark')) return 'the rendered DOM was changed';
+        return true;
+      } },
+      { name: 'reverse: typing in the source keeps the mark on the caret line', shot: 'rev-typing', fn: async function() {
+        load(sample);
+        var at = sample.indexOf('first item') + 5;
+        await srcSelect(at);
+        ed.setRangeText('XY', at, at, 'end');
+        ed.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: 'XY', bubbles: true }));
+        await delay(150);
+        if (T().source().indexOf('- firstXY item') < 0) return 'source missing "- firstXY item"';
+        return expect('caret', ['firstXY item']);
+      } },
+      { name: 'reverse: edit after mapping', shot: 'rev-edit-after-mapping', fn: async function() {
+        load('aaa\n\nbbb target\n');
+        await srcText('target');
+        var r = expect('range', ['target']);
+        if (r !== true) return 'before edit: ' + r;
+        ed.setRangeText('PREFIX ', 0, 0, 'end');
+        ed.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: 'PREFIX ', bubbles: true }));
+        await srcText('target');
+        r = expect('range', ['target']);
+        return r === true ? true : 'after edit: ' + r;
+      } },
+      { name: 'reverse: rendered focus clears it, forward mark still works', fn: async function() {
+        load(sample);
+        await srcText('alpha');
+        if (!T().previewHighlight()) return 'no mark before preview focus';
+        preview.focus();
+        select('bold');
+        await delay(150);
+        if (T().previewHighlight() !== null) return 'preview mark survived preview focus';
+        var h = T().highlight();
+        if (!h || T().source().slice(h.s, h.e) !== 'bold') return 'forward mark broken: ' + JSON.stringify(h);
+        return true;
+      } },
+      { name: 'reverse: source-only view marks nothing', fn: async function() {
+        load(sample);
+        T().commands.viewSource();
+        await srcText('alpha');
+        var h = T().previewHighlight();
+        T().commands.split();
+        return h === null ? true : 'got ' + JSON.stringify(h) + ' in source-only view';
+      } },
+    ];
+  }
+
   // Source highlighting and scroll sync checks.
   function syncChecks(done) {
     var ed = document.getElementById('editor');
@@ -1147,6 +1320,8 @@ window.addEventListener('DOMContentLoaded', function() {
         }
       }
     ];
+
+    tests = tests.concat(reverseTests(ed, preview, delay, shot));
 
     var idx = 0;
     async function runNext() {

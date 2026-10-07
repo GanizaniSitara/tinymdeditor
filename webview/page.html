@@ -73,6 +73,8 @@ html, body { height:100%; overflow:hidden; font-family: Arial, Helvetica, sans-s
   color:transparent;
   border-radius:2px;
 }
+/* The rendered text behind the Markdown selection, drawn without touching the DOM. */
+::highlight(tinymd-src) { background-color:#fff1a8; }
 .editor-pane textarea {
   position:relative; z-index:1;
   flex:1; resize:none; border:none; outline:none;
