@@ -738,6 +738,7 @@ func main() {
 	var initialContent string
 	autoPrint := false
 	selftestOut := ""
+	shotsDir := ""
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -745,6 +746,9 @@ func main() {
 			autoPrint = true
 		} else if arg == "--selftest" && i+1 < len(args) {
 			selftestOut = args[i+1]
+			i++
+		} else if arg == "--shots" && i+1 < len(args) {
+			shotsDir = args[i+1]
 			i++
 		} else if currentFile == "" && browseRoot == "" {
 			info, err := os.Stat(arg)
@@ -799,7 +803,7 @@ func main() {
 		installEditorKeyboardHook(w)
 		defer uninstallEditorKeyboardHook()
 	} else {
-		startSelftest(w, selftestOut)
+		startSelftest(w, selftestOut, shotsDir)
 	}
 	bindShell(w)
 
