@@ -892,6 +892,16 @@ window.addEventListener('DOMContentLoaded', function() {
         preview.scrollTop = preview.scrollHeight;
         await delay(150);
         if (ed.scrollTop + ed.clientHeight < ed.scrollHeight - 2) return 'Markdown pane not at the bottom with the rendered one';
+        // Grabbing the Markdown scrollbar focuses the pane with its caret far away;
+        // that must not pull both panes back to the caret.
+        ed.focus();
+        ed.setSelectionRange(0, 0);
+        ed.scrollTop = ed.scrollHeight / 2;
+        ed.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+        await delay(200);
+        a = topOfEditor(); b = topOfPreview();
+        if (a < 140) return 'Markdown scrollbar drag snapped back to the caret: top ~' + a;
+        if (Math.abs(a - b) > 3) return 'after the scrollbar drag, Markdown top ~' + a + ' but rendered top ' + b;
         T().commands.scrollLock();
         var before = ed.scrollTop;
         preview.scrollTop = 0;
