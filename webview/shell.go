@@ -94,6 +94,8 @@ type pageSettings struct {
 	Zoom  float64 `json:"zoom"`
 	Wide  bool    `json:"wide"`
 	Split float64 `json:"split"`
+	// ScrollLock keeps the split panes scrolling together.
+	ScrollLock bool `json:"scrollLock"`
 }
 
 func settingsPath() string {
@@ -127,6 +129,8 @@ func loadSettings() {
 			}
 		case "wide_margins":
 			settings.Wide = value == "1"
+		case "scroll_lock":
+			settings.ScrollLock = value == "1"
 		case "split":
 			if s, err := strconv.ParseFloat(value, 64); err == nil && s >= 10 && s <= 90 {
 				settings.Split = s
@@ -151,6 +155,11 @@ func saveSettings() {
 		wide = "1"
 	}
 	sb.WriteString("wide_margins=" + wide + "\n")
+	lock := "0"
+	if settings.ScrollLock {
+		lock = "1"
+	}
+	sb.WriteString("scroll_lock=" + lock + "\n")
 	sb.WriteString("split=" + strconv.FormatFloat(settings.Split, 'f', 1, 64) + "\n")
 	for _, path := range recent {
 		sb.WriteString("recent=" + path + "\n")

@@ -863,6 +863,42 @@ window.addEventListener('DOMContentLoaded', function() {
         if (preview.scrollTop >= down) return 'rendered pane did not scroll back up: ' + preview.scrollTop + ' >= ' + down;
         return true;
       } },
+      { name: 'scroll lock: the panes scroll together', shot: 'scroll-lock', fn: async function() {
+        load(longDoc());
+        T().commands.scrollLock();
+        if (!T().scrollLock()) return 'scroll lock did not turn on';
+        if (!document.getElementById('scrollLock').classList.contains('on')) return 'Lock button not shown as on';
+        // The paragraph at the top of each pane, read from the pane's own content.
+        function topOfEditor() { return Math.round(ed.scrollTop / ed.scrollHeight * 300) + 1; }
+        function topOfPreview() {
+          var r = preview.getBoundingClientRect();
+          var el = document.elementFromPoint(r.left + 40, r.top + 20);
+          var m = el && /Paragraph (\d+)/.exec(el.textContent);
+          return m ? +m[1] : -1;
+        }
+        // Let the highlight for the caret load leaves settle before scrolling.
+        await delay(150);
+        ed.scrollTop = ed.scrollHeight / 2;
+        await delay(150);
+        var a = topOfEditor(), b = topOfPreview();
+        if (a < 140) return 'Markdown pane did not stay scrolled: top ~' + a;
+        if (Math.abs(a - b) > 3) return 'Markdown top ~' + a + ' but rendered top ' + b;
+        await shot('scroll-lock-from-markdown');
+        preview.scrollTop = preview.scrollHeight / 5;
+        await delay(150);
+        a = topOfEditor(); b = topOfPreview();
+        if (b < 40 || b > 80) return 'rendered pane did not stay scrolled: top ' + b;
+        if (Math.abs(a - b) > 3) return 'rendered top ' + b + ' but Markdown top ~' + a;
+        preview.scrollTop = preview.scrollHeight;
+        await delay(150);
+        if (ed.scrollTop + ed.clientHeight < ed.scrollHeight - 2) return 'Markdown pane not at the bottom with the rendered one';
+        T().commands.scrollLock();
+        var before = ed.scrollTop;
+        preview.scrollTop = 0;
+        await delay(150);
+        if (ed.scrollTop !== before) return 'unlocked, the Markdown pane still followed: ' + before + ' -> ' + ed.scrollTop;
+        return true;
+      } },
       { name: 'reverse: no fighting the user', shot: 'rev-no-fighting', fn: async function() {
         load(longDoc());
         await srcText('Paragraph 150.');
@@ -1332,6 +1368,8 @@ window.addEventListener('DOMContentLoaded', function() {
       var t = tests[idx++];
       try {
         T().commands.split();
+        // The remembered setting must not leak into tests that scroll one pane.
+        if (T().scrollLock()) T().commands.scrollLock();
         var detail = await t.fn();
         results.push({ name: t.name, ok: detail === true, detail: detail === true ? '' : String(detail) });
         if (t.shot) await shot(t.shot);
