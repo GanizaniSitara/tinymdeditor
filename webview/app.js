@@ -1634,7 +1634,10 @@ function updatePreviewHighlight() {
   mark.ranges.forEach(function(r) { hl.add(r); });
   CSS.highlights.set('tinymd-src', hl);
   // Scroll only when the mark is out of view, so reading the rendered pane is not
-  // fought while the caret moves within what it already shows.
+  // fought while the caret moves within what it already shows. With scrolling
+  // locked the panes already line up, and scrolling to a caret left behind would
+  // drag the Markdown pane back as the user moves it.
+  if (scrollLock) return;
   var box = mark.ranges[0].getBoundingClientRect();
   if (!box.width && !box.height) box = elementOf(mark.ranges[0].startContainer).getBoundingClientRect();
   var pane = preview.getBoundingClientRect();
