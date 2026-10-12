@@ -29,6 +29,7 @@ var settings = _settings || {};
 var view = settings.view || 'split';
 var zoom = settings.zoom || 1;
 var wide = !!settings.wide;
+var scrollLock = !!settings.scrollLock;
 var lastFind = '';
 
 // ---------------------------------------------------------------- rendering
@@ -882,7 +883,7 @@ function setWide(on) {
 
 function saveSettings() {
   if (typeof goSaveSettings === 'function') {
-    goSaveSettings(JSON.stringify({ view: view, zoom: zoom, wide: wide, split: splitPct }));
+    goSaveSettings(JSON.stringify({ view: view, zoom: zoom, wide: wide, split: splitPct, scrollLock: scrollLock }));
   }
 }
 
@@ -1120,6 +1121,7 @@ var commands = {
   zoomOut: function() { setZoom(zoom - 0.1); },
   zoomReset: function() { setZoom(1); },
   wide: function() { setWide(!wide); },
+  scrollLock: function() { setScrollLock(!scrollLock); },
   bold: function() { toggleWrap('**', '**', 'bold text'); },
   italic: function() { toggleWrap('*', '*', 'italic text'); },
   heading: fmtHeading,
@@ -1660,6 +1662,80 @@ editor.addEventListener('selectionchange', schedulePreviewHighlight);
 preview.addEventListener('focus', clearPreviewHighlight);
 preview.addEventListener('mousedown', clearPreviewHighlight);
 
+// ---------------------------------------------------------------- locked scrolling
+
+// With scrolling locked, the split panes move together: each rendered block is
+// pinned to the Markdown line it came from, and the scroll between two blocks is
+// shared out evenly. A hidden copy of the highlight backdrop measures the lines.
+var scrollMirror = editorHighlight.cloneNode(false);
+scrollMirror.removeAttribute('id');
+scrollMirror.style.visibility = 'hidden';
+editorPane.appendChild(scrollMirror);
+var scrollMap = null, scrollKey = '', scrollBlocks = null, scrollEcho = null;
+
+// buildScrollMap lists [Markdown scrollTop, rendered scrollTop] pairs that line up,
+// rising in both, from the top of both panes to the bottom of both.
+function buildScrollMap() {
+  var key = [editor.clientWidth, editor.scrollHeight, editor.clientHeight,
+    preview.clientWidth, preview.scrollHeight, preview.clientHeight].join();
+  if (scrollMap && key === scrollKey && blocks === scrollBlocks) return scrollMap;
+  var eMax = Math.max(0, editor.scrollHeight - editor.clientHeight);
+  var pMax = Math.max(0, preview.scrollHeight - preview.clientHeight);
+  var src = editor.value, html = '', at = 0;
+  for (var b = 0; b < blocks.length; b++) {
+    html += esc(src.slice(at, blocks[b].start)) + '<span></span>';
+    at = blocks[b].start;
+  }
+  scrollMirror.style.width = editor.clientWidth + 'px';
+  scrollMirror.innerHTML = html + esc(src.slice(at)) + '\n ';
+  var marks = scrollMirror.children;
+  var origin = preview.getBoundingClientRect().top - preview.scrollTop;
+  var map = [[0, 0]];
+  for (b = 0; b < blocks.length; b++) {
+    if (!blocks[b].el || !blocks[b].el.isConnected) continue;
+    var e = marks[b].offsetTop, p = blocks[b].el.getBoundingClientRect().top - origin;
+    var last = map[map.length - 1];
+    if (e > last[0] && p > last[1] && e < eMax && p < pMax) map.push([e, p]);
+  }
+  map.push([eMax, pMax]);
+  scrollMirror.innerHTML = '';
+  scrollMap = map; scrollKey = key; scrollBlocks = blocks;
+  return map;
+}
+
+// mapScroll turns a scrollTop in column from of the map into one in column to.
+function mapScroll(y, map, from, to) {
+  for (var i = 1; i < map.length; i++) {
+    if (y > map[i][from] && i < map.length - 1) continue;
+    var a = map[i - 1], c = map[i], span = c[from] - a[from];
+    var f = span > 0 ? Math.max(0, Math.min(1, (y - a[from]) / span)) : 0;
+    return a[to] + f * (c[to] - a[to]);
+  }
+  return 0;
+}
+
+function followScroll(from) {
+  if (!scrollLock || view !== 'split') return;
+  // The scroll this code caused in the other pane must not be followed back.
+  if (scrollEcho === from) { scrollEcho = null; return; }
+  var map = buildScrollMap(), other = from === editor ? preview : editor;
+  var y = from === editor ? mapScroll(editor.scrollTop, map, 0, 1) : mapScroll(preview.scrollTop, map, 1, 0);
+  y = Math.round(Math.max(0, Math.min(y, other.scrollHeight - other.clientHeight)));
+  if (Math.abs(other.scrollTop - y) < 1) return;
+  scrollEcho = other;
+  other.scrollTop = y;
+}
+
+function setScrollLock(on) {
+  scrollLock = on;
+  document.getElementById('scrollLock').classList.toggle('on', scrollLock);
+  if (scrollLock) followScroll(lastPane === 'preview' ? preview : editor);
+  saveSettings();
+}
+
+editor.addEventListener('scroll', function() { followScroll(editor); });
+preview.addEventListener('scroll', function() { followScroll(preview); });
+
 // ---------------------------------------------------------------- divider
 
 var splitPct = settings.split || 50;
@@ -1761,6 +1837,7 @@ savedValue = editor.value;
 resetHistory();
 document.documentElement.style.setProperty('--z', zoom);
 document.body.classList.toggle('wide', wide);
+document.getElementById('scrollLock').classList.toggle('on', scrollLock);
 render();
 applyView(view, false);
 if (view === 'rendered') lastPane = 'preview';
@@ -1802,6 +1879,7 @@ window.tinyMdTest = {
     updateHighlight();
   },
   canHighlight: function() { return canHighlight; },
+  scrollLock: function() { return scrollLock; },
   previewHighlight: function() {
     if (!previewMark || !CSS.highlights.has('tinymd-src')) return null;
     return {
