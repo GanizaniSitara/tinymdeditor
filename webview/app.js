@@ -69,7 +69,17 @@ function render() {
     var t = toks[k], start = pos;
     pos += t.raw.length;
     if (text.substr(start, t.raw.length) !== t.raw) ok = false;
-    if (t.type === 'space') continue;
+    if (t.type === 'space') {
+      // Markdown collapses blank lines visually; the editor needs caret hosts
+      // for blank paragraphs created by Enter, including at document end.
+      var lines=(t.raw.match(/\n/g)||[]).length;
+      var blanks=Math.max(0,Math.floor(lines/2)-(k < toks.length-1 ? 1 : 0));
+      for (var j=0;j<blanks;j++) {
+        html.push('<div class="blk" data-b="'+blocks.length+'"><p><br></p></div>');
+        blocks.push({start:start+2*(j+1),end:start+2*(j+1),tok:{type:'paragraph',raw:''},el:null,text:'',map:[]});
+      }
+      continue;
+    }
     var one = [t];
     one.links = toks.links;
     var inner = '';
@@ -86,9 +96,17 @@ function render() {
     a.title = 'Ctrl+click to open ' + a.getAttribute('href');
   });
   for (var b = 0; b < blocks.length; b++) blocks[b].el = preview.children[b];
+  if (!blocks.length) {
+    var empty = document.createElement('div');
+    empty.className = 'blk'; empty.dataset.b = '0';
+    empty.innerHTML = '<p><br></p>';
+    preview.appendChild(empty);
+    blocks.push({start: 0, end: text.length, tok: {type:'paragraph', raw:text}, el:empty, text:'', map:[]});
+  }
   // An empty list item cannot hold a caret until it has something in it.
   preview.querySelectorAll('li:empty').forEach(function(li) { li.appendChild(document.createElement('br')); });
   setEditable(ok);
+  blocks.forEach(blockMap);
 }
 
 function setEditable(on) {
@@ -189,8 +207,11 @@ function emptyItemSource(b, li) {
   var list = li.parentNode;
   if (!list || list.parentNode !== b.el || b.tok.type !== 'list') return -1;
   var index = Array.prototype.indexOf.call(list.children, li), src = editor.value, cur = b.start;
-  for (var k = 0; k < b.tok.items.length; k++) {
-    var item = b.tok.items[k], at = src.indexOf(item.raw, cur);
+  // Read current list tokens after stable text edits rather than stale raw text.
+  var fresh=marked.lexer(src.slice(b.start,b.end))[0];
+  var items=fresh && fresh.type === 'list' ? fresh.items : b.tok.items;
+  for (var k = 0; k < items.length; k++) {
+    var item = items[k], at = src.indexOf(item.raw, cur);
     if (at < 0) return -1;
     if (k === index) {
       // marked trims an empty item's raw text, so read the spaces from the source.
@@ -221,10 +242,16 @@ function domToPos(node, off) {
   var blk = el.closest('.blk');
   if (!blk) return null;
   var b = +blk.dataset.b, pos = { b: b, i: textOffset(blk, node, off) };
+  // A caret explicitly at the start of a text node belongs to that node's
+  // formatting, rather than the preceding run across hidden delimiters.
+  if (node.nodeType === 3 && off === 0) {
+    var map=blockMap(blocks[b]).map;
+    if (map[pos.i] >= 0) pos.src=map[pos.i];
+  }
   var li = el.closest('li');
   if (li && li.textContent.trim() === '') {
     var at = emptyItemSource(blocks[b], li);
-    if (at >= 0) pos.src = at;
+    if (at >= 0) { pos.src = at; pos.emptyItem = true; }
   }
   return pos;
 }
@@ -257,11 +284,12 @@ function nextMapped(p) {
 // pointAt is the DOM point for rendered offset i in block b. Whitespace-only text
 // between list items or table cells is skipped, so a caret at a boundary lands at
 // the start of the next item rather than in the gap.
-function pointAt(b, i) {
+function pointAt(b, i, forward) {
   var el = blocks[b].el, walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), n, acc = 0, last = null;
   while ((n = walker.nextNode())) {
     var len = n.data.length;
-    if (i < acc + len || (i === acc + len && !/^\s*$/.test(n.data))) return { node: n, off: i - acc };
+    var userText=n.parentElement && n.parentElement.closest('p,h1,h2,h3,h4,h5,h6,li,td,th,pre');
+    if (i < acc + len || (!forward && i === acc + len && (userText || !/^\s*$/.test(n.data)))) return { node: n, off: i - acc };
     acc += len;
     last = n;
   }
@@ -283,7 +311,7 @@ function srcToDom(C) {
     }
     var m = blockMap(B).map, i;
     for (i = 1; i <= m.length; i++) if (m[i - 1] >= 0 && m[i - 1] + 1 === C) return pointAt(b, i);
-    for (i = 0; i < m.length; i++) if (m[i] === C) return pointAt(b, i);
+    for (i = 0; i < m.length; i++) if (m[i] === C) return pointAt(b, i, true);
     var best = -1, bestD = 1e9;
     for (i = 0; i < m.length; i++) {
       if (m[i] < 0) continue;
@@ -291,6 +319,7 @@ function srcToDom(C) {
       if (d < bestD) { bestD = d; best = m[i] < C ? i + 1 : i; }
     }
     if (best >= 0) return pointAt(b, best);
+    if (!m.some(function(p) { return p >= 0; })) return pointAt(b,0);
   }
   return null;
 }
@@ -333,6 +362,14 @@ function mappedRanges(a, c) {
       if (last && last.e === m[i]) last.e = m[i] + 1;
       else out.push({ s: m[i], e: m[i] + 1 });
     }
+    if (b < c.b) {
+      var left=blockMap(blocks[b]).map.filter(function(p) { return p>=0; });
+      var right=blockMap(blocks[b+1]).map.filter(function(p) { return p>=0; });
+      var end=left.length ? left[left.length-1]+1 : blocks[b].start;
+      var start=right.length ? right[0] : blocks[b+1].start;
+      var gap=editor.value.slice(end,start), breaks=/[ \t]*\r?\n[\r\n \t]*/g, match;
+      while ((match=breaks.exec(gap))) out.push({s:end+match.index,e:end+match.index+match[0].length});
+    }
   }
   out = out.map(expandEmptyMarkup);
   out.sort(function(x, y) { return x.s - y.s; });
@@ -358,8 +395,11 @@ function expandEmptyMarkup(r) {
     var left = 0, right = 0;
     while (r.s - left - 1 >= 0 && src[r.s - left - 1] === c) left++;
     while (r.e + right < src.length && src[r.e + right] === c) right++;
-    var bef = r.s - left - 1, aft = r.e + right;
-    if (left !== right || (bef >= 0 && isWordChar(src[bef])) || (aft < src.length && isWordChar(src[aft]))) return r;
+    var visibleMarker=blocks.some(function(b) {
+      var map=blockMap(b).map;
+      return map.indexOf(r.s-1) >= 0 || map.indexOf(r.e) >= 0;
+    });
+    if (left !== right || visibleMarker) return r;
     r = { s: r.s - left, e: r.e + right };
   }
   return r;
@@ -368,17 +408,68 @@ function expandEmptyMarkup(r) {
 // applyEdits splices edits ({s, e, t}: replace [s, e) with t) into the source as
 // one undo step, re-renders, and puts the selection at caret/anchor, which are
 // offsets in the edited source.
-function applyEdits(edits, caret, anchor, kind) {
+function applyEdits(edits, caret, anchor, kind, nativeBlock) {
   if (!edits.length) return;
   if (anchor === undefined) anchor = caret;
+  // Selection replacement is one contiguous edit, including its DOM update.
+  if (edits.length === 2) {
+    var ins=edits.find(function(e) { return e.s === e.e && e.t; });
+    var del=edits.find(function(e) { return e.e > e.s && !e.t; });
+    if (ins && del && ins.s === del.s) edits=[{s:del.s,e:del.e,t:ins.t}];
+  }
+  var top=preview.scrollTop, left=preview.scrollLeft;
   var v = editor.value, at = Infinity;
+  var patched = edits.length === 1 && patchText(edits[0],nativeBlock);
   edits.sort(function(x, y) { return (y.s - x.s) || (y.e - x.e); });
   edits.forEach(function(ed) { v = v.slice(0, ed.s) + ed.t + v.slice(ed.e); at = Math.min(at, ed.s); });
   record(v, caret, anchor, at, kind || 'edit');
   editor.value = v;
-  render();
+  if (!patched) render();
   restoreSelection(caret, anchor);
+  preview.scrollTop=top; preview.scrollLeft=left;
   updateDirty();
+}
+
+// Ordinary edits update a text node and its explicit source map together. Do not
+// re-lex an unfinished word: Markdown whitespace and delimiters must remain
+// editable, and replacing the active subtree interrupts browser selection/IME.
+function patchText(ed, nativeBlock) {
+  if (/[\r\n]/.test(ed.t)) return false;
+  if (!nativeBlock && insideCell() && /\\/.test(ed.t)) return false;
+  blocks.forEach(blockMap);
+  var bi = -1, from = -1, to = -1;
+  for (var k = 0; k < blocks.length; k++) {
+    var b = blocks[k], m = b.map;
+    for (var i = 0; i <= m.length; i++) {
+      var at = i > 0 && m[i-1] >= 0 ? m[i-1]+1 : (m[i] >= 0 ? m[i] : b.start);
+      if (at !== ed.s && m[i] !== ed.s) continue;
+      var n = ed.e-ed.s;
+      if (n && (i+n > m.length || !m.slice(i,i+n).every(function(p,j) { return p === ed.s+j; }))) continue;
+      bi=k; from=i; to=i+n; break;
+    }
+    if (bi >= 0) break;
+  }
+  if (bi < 0) return false;
+  var B=blocks[bi], forward=from > 0 && B.map[from] === ed.s && B.map[from-1]+1 !== ed.s;
+  var a=pointAt(bi,from,forward), c=pointAt(bi,to,forward && from === to);
+  if (!nativeBlock) {
+    if (a.node !== c.node) return false;
+    if (a.node.nodeType === 3) a.node.replaceData(a.off,c.off-a.off,ed.t);
+    else if (!B.text.length && ed.s === ed.e) {
+      var p=B.el.querySelector('p') || B.el;
+      p.replaceChildren(document.createTextNode(ed.t));
+    } else return false;
+  } else if (nativeBlock !== B) return false;
+  var delta=ed.t.length-(ed.e-ed.s);
+  blocks.forEach(function(b,k) {
+    b.map=b.map.map(function(p) { return p >= ed.e ? p+delta : p; });
+    if (k === bi) {
+      var inserted=Array.from({length:ed.t.length},function(_,j) { return ed.s+j; });
+      b.map.splice.apply(b.map,[from,to-from].concat(inserted));
+      b.text=b.el.textContent; b.end+=delta;
+    } else if (b.start >= ed.e) { b.start+=delta; b.end+=delta; }
+  });
+  return true;
 }
 
 function restoreSelection(caret, anchor) {
@@ -418,7 +509,7 @@ function typeText(t) {
   var sp = selPositions();
   if (!sp) return;
   if (sp.focus.pending && pending) {
-    var P = pending.src, ins = '\n\n' + t;
+    var P = pending.src, ins = pending.prefix + t;
     if (t) applyEdits([{ s: P, e: P, t: ins }], P + ins.length, undefined, 'type');
     return;
   }
@@ -431,7 +522,7 @@ function typeText(t) {
   } else {
     at = srcAt(sp.focus);
     // An empty item written as a bare "-" needs a space before its text.
-    if (sp.focus.src !== undefined && t && at > 0 && !/[ \t]/.test(editor.value[at - 1])) t = ' ' + t;
+    if (sp.focus.emptyItem && t && at > 0 && !/[ \t]/.test(editor.value[at - 1])) t = ' ' + t;
   }
   if (at < 0) return;
   if (t) edits.push({ s: at, e: at, t: t });
@@ -447,12 +538,19 @@ function deleteRange(range) {
   if (a.pending || c.pending) { closePending(); return; }
   var ranges = mappedRanges(a, c);
   if (ranges.length) {
-    applyEdits(ranges.map(function(x) { return { s: x.s, e: x.e, t: '' }; }), ranges[0].s, undefined, 'delete');
+    applyEdits(ranges.map(function(x) { return { s: x.s, e: x.e, t: '' }; }), Math.min(srcAt(a),ranges[0].s), undefined, 'delete');
     return;
   }
   var s = srcAt(a), e = c.src !== undefined ? c.src : nextMapped(c);
   if (s < 0 || e <= s) return;
   var gap = editor.value.slice(s, e);
+  // Closing/opening inline delimiters are outside the mapped text. Keep them
+  // balanced while removing the paragraph separator between formatted runs.
+  var close=/^[*_~`]+/.exec(gap), open=/[*_~`]+$/.exec(gap);
+  var joinStart=s+(close ? close[0].length : 0), joinEnd=e-(open ? open[0].length : 0);
+  if (joinEnd > joinStart && /^[ \t]*\n[\s]*$/.test(editor.value.slice(joinStart,joinEnd)) && !insideCell()) {
+    applyEdits([{s:joinStart,e:joinEnd,t:''}],s,undefined,'delete'); return;
+  }
   if (/^[ \t]*(\n[ \t>]*)+((?:[-*+]|\d{1,9}[.)]|#{1,6})[ \t]+)?[ \t>]*$/.test(gap) && !insideCell()) {
     applyEdits([{ s: s, e: e, t: '' }], s, undefined, 'delete');
   }
@@ -464,6 +562,13 @@ function deleteDirection(backward, unit) {
   if (!s.isCollapsed) { deleteRange(s.getRangeAt(0)); return; }
   var pos = domToPos(s.focusNode, s.focusOffset);
   if (pos && pos.pending) { closePending(); return; }
+  if (backward && pos && pos.b > 0 && !blockMap(blocks[pos.b]).map.some(function(p) { return p >= 0; })) {
+    var prev=blockMap(blocks[pos.b-1]), mapped=prev.map.filter(function(p) { return p>=0; });
+    var from=mapped.length ? mapped[mapped.length-1]+1 : prev.start, to=srcAt(pos);
+    if (to > from && /^\s*$/.test(editor.value.slice(from,to))) {
+      applyEdits([{s:from,e:to,t:''}],from,undefined,'delete'); return;
+    }
+  }
   var node = s.focusNode, off = s.focusOffset;
   s.modify('extend', backward ? 'backward' : 'forward', unit || 'character');
   var r = s.rangeCount ? s.getRangeAt(0).cloneRange() : null;
@@ -471,14 +576,14 @@ function deleteDirection(backward, unit) {
   if (r) deleteRange(r);
 }
 
-function openPending(blockIndex, src) {
+function openPending(blockIndex, src, prefix) {
   var b = blocks[blockIndex];
   if (!b) return;
   var p = document.createElement('p');
   p.className = 'pending';
   p.appendChild(document.createElement('br'));
   b.el.parentNode.insertBefore(p, b.el.nextSibling);
-  pending = { el: p, src: src };
+  pending = { el: p, src: src, prefix: prefix === undefined ? '\n\n' : prefix };
   window.getSelection().setBaseAndExtent(p, 0, p, 0);
   p.scrollIntoView({ block: 'nearest' });
 }
@@ -486,6 +591,10 @@ function openPending(blockIndex, src) {
 function closePending() {
   if (!pending) return;
   var src = pending.src;
+  if (pending.prefix === '') {
+    applyEdits([{s:src-2,e:src,t:''}],src-2,undefined,'delete');
+    return;
+  }
   pending.el.remove();
   pending = null;
   var c = nearestDom(src);
@@ -494,6 +603,39 @@ function closePending() {
 
 function lineStartOf(v, p) { while (p > 0 && v[p - 1] !== '\n') p--; return p; }
 
+// Close and reopen inline wrappers around a paragraph split. Read fresh tokens
+// because stable typing deliberately keeps the current rendered nodes alive.
+function paragraphSplit(b, caret, separator) {
+  if (separator === undefined) separator='\n\n';
+  var src=editor.value, spans=[];
+  function walk(tokens,start,end) {
+    var cur=start;
+    (tokens || []).forEach(function(tok) {
+      if (typeof tok.raw !== 'string') return;
+      var at=src.indexOf(tok.raw,cur);
+      if (at < cur || at+tok.raw.length > end) return;
+      var offset=typeof tok.text === 'string' ? tok.raw.indexOf(tok.text) : -1;
+      if (/^(strong|em|del|link)$/.test(tok.type) && offset > 0) {
+        spans.push({start:at,end:at+tok.raw.length,from:at+offset,to:at+offset+tok.text.length,
+          open:tok.raw.slice(0,offset),close:tok.raw.slice(offset+tok.text.length)});
+      }
+      walk(childTokens(tok),at,at+tok.raw.length);
+      cur=at+tok.raw.length;
+    });
+  }
+  walk(marked.lexer(src.slice(b.start,b.end)),b.start,b.end);
+  var at=caret;
+  spans.forEach(function(span) {
+    if (caret === span.from) at=Math.min(at,span.start);
+    if (caret === span.to) at=Math.max(at,span.end);
+  });
+  var open='',close='';
+  spans.forEach(function(span) {
+    if (span.from < at && at < span.to) { open+=span.open; close=span.close+close; }
+  });
+  return {at:at,text:close+separator+open,caret:at+close.length+separator.length+open.length};
+}
+
 // pressEnter splits the rendered text the way its Markdown expects: a new list
 // item, a new quoted paragraph, a new line of code, or a new paragraph.
 function pressEnter() {
@@ -501,11 +643,20 @@ function pressEnter() {
   var sp = selPositions();
   if (!sp) return;
   if (!sp.collapsed) { deleteSelection(); sp = selPositions(); if (!sp) return; }
-  if (sp.focus.pending) return;
+  if (sp.focus.pending && pending) {
+    var at=pending.src, text=pending.prefix+'\n\n';
+    applyEdits([{s:at,e:at,t:text}],at+text.length,undefined,'edit');
+    return;
+  }
   var el = elementOf(window.getSelection().focusNode);
   if (!el || el.closest('td,th')) return;
   var v = editor.value, P = srcAt(sp.focus);
   if (P < 0) return;
+  var B = blockMap(blocks[sp.focus.b]);
+  function splitWith(separator) {
+    var split=paragraphSplit(B,P,separator);
+    applyEdits([{s:split.at,e:split.at,t:split.text}],split.caret,undefined,'edit');
+  }
   if (el.closest('pre')) {
     var ind = /^[ \t]*/.exec(v.slice(lineStartOf(v, P), P))[0];
     applyEdits([{ s: P, e: P, t: '\n' + ind }], P + 1 + ind.length);
@@ -517,9 +668,7 @@ function pressEnter() {
       // Enter on an empty item ends the list, as in a word processor.
       var ls = lineStartOf(v, P), prevEnd = ls;
       while (prevEnd > 0 && v[prevEnd - 1] === '\n') prevEnd--;
-      applyEdits([{ s: prevEnd, e: P, t: '' }], prevEnd);
-      var bi = blockAtSource(prevEnd);
-      if (bi >= 0) openPending(bi, prevEnd);
+      applyEdits([{ s: prevEnd, e: P, t: '\n\n' }], prevEnd+2);
       return;
     }
     var marker = null;
@@ -530,20 +679,17 @@ function pressEnter() {
     }
     var next = '- ';
     if (marker) next = marker[1] + (marker[3] ? String(+marker[2] + 1) : marker[2]) + marker[3] + marker[4];
-    applyEdits([{ s: P, e: P, t: '\n' + next }], P + 1 + next.length);
+    splitWith('\n'+next);
     return;
   }
   if (el.closest('blockquote')) {
     var q = /^[ \t]*(?:>[ \t]?)+/.exec(v.slice(lineStartOf(v, P)));
     q = q ? q[0] : '> ';
     var text = '\n' + q.replace(/[ \t]+$/, '') + '\n' + q;
-    applyEdits([{ s: P, e: P, t: text }], P + text.length);
+    splitWith(text);
     return;
   }
-  var B = blockMap(blocks[sp.focus.b]);
-  var atEnd = !B.map.slice(sp.focus.i).some(function(x) { return x >= 0; });
-  if (atEnd) { openPending(sp.focus.b, P); return; }
-  applyEdits([{ s: P, e: P, t: '\n\n' }], P + 2);
+  splitWith('\n\n');
 }
 
 function blockAtSource(C) {
@@ -1165,6 +1311,15 @@ document.addEventListener('keydown', async function(e) {
     return;
   }
   if (!e.ctrlKey || e.altKey || e.metaKey) return;
+  if (e.shiftKey && (e.code === 'Minus' || e.key === '_' || e.key === '-')) {
+    if (document.activeElement && document.activeElement.id === 'askInput') return;
+    e.preventDefault(); e.stopPropagation();
+    lastKind = '';
+    if (lastPane === 'preview' && view !== 'source') typeText('\u2014');
+    else replaceEditorSelection('\u2014');
+    lastKind = '';
+    return;
+  }
   var key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   if (e.shiftKey && /^[a-z]$/.test(key)) key = key.toUpperCase();
   if (key === 'C') { e.preventDefault(); if (typeof goCopyPath === 'function') flashStatus(await goCopyPath()); return; }
@@ -1202,15 +1357,32 @@ document.addEventListener('wheel', function(e) {
 
 // ---------------------------------------------------------------- rendered input
 
+var composing = false;
+var nativeSelection = null;
+function captureNativeSelection() {
+  var sp=selPositions();
+  if (!sp || sp.focus.pending) return null;
+  var r=ordered(sp), ranges=sp.collapsed ? [] : mappedRanges(r[0],r[1]);
+  return {value:editor.value,at:ranges.length ? ranges[0].s : srcAt(sp.focus),ranges:ranges,block:sp.focus.b};
+}
 preview.addEventListener('beforeinput', function(e) {
   if (!editable) { e.preventDefault(); return; }
   var t = e.inputType;
-  if (t === 'insertCompositionText') return; // an IME owns this; the input handler re-syncs
+  if (!composing) nativeSelection=captureNativeSelection();
+  if (composing || e.isComposing || t === 'insertCompositionText' || !e.cancelable) return;
+  nativeSelection=null;
   e.preventDefault();
   if (t === 'insertText' || t === 'insertReplacementText') {
     var data = e.data;
     if (data == null && e.dataTransfer) data = e.dataTransfer.getData('text/plain');
-    if (data != null) typeText(data);
+    if (data != null) {
+      var sp = selPositions(), el = elementOf(window.getSelection().focusNode);
+      var at = sp && sp.collapsed ? srcAt(sp.focus) : -1;
+      if (t === 'insertText' && data === ' ' && at >= 2 && editor.value.slice(at-2,at) === '--' &&
+          editor.value[at-3] !== '-' && editor.value[at] !== '-' && el && !el.closest('code,pre')) {
+        applyEdits([{s:at-2,e:at,t:'\u2014 '}],at,undefined,'dash');
+      } else typeText(data);
+    }
   } else if (t === 'insertParagraph') {
     pressEnter();
   } else if (t === 'insertLineBreak') {
@@ -1233,16 +1405,90 @@ preview.addEventListener('beforeinput', function(e) {
   }
 });
 
-// After an IME composes text straight into the DOM, rebuild from the source so the
-// rendering never disagrees with the document.
-preview.addEventListener('input', function(e) {
-  if (e.inputType === 'insertCompositionText' || e.isComposing) return;
-  if (editable) render();
-});
-preview.addEventListener('compositionend', function(e) {
+// Native edits (including IME and accessibility input) are diffed against the
+// last mapped text, then committed as source splices without replacing the DOM.
+function syncNativeInput(inputType, data) {
   if (!editable) return;
-  render();
-  if (e.data) typeText(e.data);
+  var s=window.getSelection(), pos=s && domToPos(s.focusNode,s.focusOffset);
+  if (!pos) return;
+  if (pos.pending && pending) {
+    var text=pending.el.textContent;
+    if (text) typeText(text.replace(/\u00a0/g,' '));
+    return;
+  }
+  var snapshot=nativeSelection;
+  nativeSelection=null;
+  if (snapshot && snapshot.value === editor.value && data != null &&
+      /^(insertText|insertReplacementText|insertCompositionText)$/.test(inputType)) {
+    if (blocks.every(function(b) { return preview.contains(b.el) && b.el.textContent === b.text; })) return;
+    var edits=snapshot.ranges.map(function(r) { return {s:r.s,e:r.e,t:''}; });
+    edits.push({s:snapshot.at,e:snapshot.at,t:data});
+    applyEdits(edits,snapshot.at+data.length,undefined,'type',blocks[snapshot.block]);
+    return;
+  }
+  var b=blocks[pos.b], global=blocks.some(function(b) { return !preview.contains(b.el); });
+  var old=global ? blocks.map(function(b) { return b.text; }).join('') : b.text;
+  var text=global ? preview.textContent : b.el.textContent;
+  if (!global && inputType === 'insertParagraph' && old === text) { pressEnter(); return; }
+  if (inputType === 'insertParagraph' || inputType === 'insertLineBreak') {
+    var focus=elementOf(s.focusNode);
+    if (focus && focus.closest('li,pre,blockquote')) { pressEnter(); return; }
+    // Native paragraph splits create sibling p/div nodes. textContent omits
+    // their boundaries, so include those boundaries in the source diff.
+    var seen=false;
+    text='';
+    Array.prototype.forEach.call(b.el.childNodes,function(n) {
+      var paragraph=n.nodeType === 1 && /^(P|DIV|H[1-6])$/.test(n.tagName);
+      if (paragraph && seen) text+='\n\n';
+      if (paragraph) {
+        text+=n.innerHTML === '<br>' ? '' : n.textContent;
+        seen=true;
+      } else if (n.nodeType === 1 && n.tagName === 'BR') text+='\n';
+      else text+=n.textContent;
+    });
+  }
+  if (old === text) return;
+  var a=0, z=0;
+  while (a < old.length && a < text.length && old[a] === text[a]) a++;
+  while (z < old.length-a && z < text.length-a && old[old.length-1-z] === text[text.length-1-z]) z++;
+  // Repeated characters are ambiguous in a textual diff. The post-edit DOM
+  // caret identifies which occurrence was inserted, including inline boundaries.
+  var delta=text.length-old.length;
+  if (!global && delta < 0 && /^delete/.test(inputType || '') &&
+      old.slice(0,pos.i)+old.slice(pos.i-delta) === text) {
+    a=pos.i; z=old.length-(a-delta);
+  }
+  if (!global && delta > 0 && pos.i >= delta &&
+      old.slice(0,pos.i-delta)+text.slice(pos.i-delta,pos.i)+old.slice(pos.i-delta) === text) {
+    a=pos.i-delta; z=old.length-a;
+  }
+  function oldPoint(offset) {
+    for (var k=0;k<blocks.length;k++) {
+      if (offset <= blocks[k].text.length || k === blocks.length-1) return {b:k,i:offset};
+      offset-=blocks[k].text.length;
+    }
+  }
+  var from=global ? oldPoint(a) : {b:pos.b,i:a};
+  var to=global ? oldPoint(old.length-z) : {b:pos.b,i:old.length-z};
+  if (!global && s.focusNode && s.focusNode.nodeType === 3 && a === textOffset(b.el,s.focusNode,0) && b.map[a] >= 0) from.src=b.map[a];
+  var ranges=to.b === from.b && to.i === from.i ? [] : mappedRanges(from,to);
+  var start=ranges.length ? ranges[0].s : srcAt(from);
+  var inserted=text.slice(a,text.length-z).replace(/\u00a0/g,' ');
+  if (start < 0) return;
+  var edits=ranges.map(function(r) { return {s:r.s,e:r.e,t:''}; });
+  if (inserted) edits.push({s:start,e:start,t:inserted});
+  var caret=start+inserted.length;
+  if (global) caret=start+Math.max(0,Math.min(inserted.length,textOffset(preview,s.focusNode,s.focusOffset)-a));
+  applyEdits(edits,caret,undefined,'type',global ? {structural:true} : b);
+}
+preview.addEventListener('input', function(e) {
+  if (composing || e.isComposing) return;
+  syncNativeInput(e.inputType,e.data);
+});
+preview.addEventListener('compositionstart', function() { nativeSelection=captureNativeSelection(); composing=true; blocks.forEach(blockMap); });
+preview.addEventListener('compositionend', function(e) {
+  composing=false;
+  syncNativeInput('insertCompositionText',e.data);
 });
 
 preview.addEventListener('copy', function(e) {

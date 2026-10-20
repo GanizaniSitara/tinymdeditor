@@ -46,11 +46,24 @@ tinymd.exe path/to/folder   # browse the folder's Markdown files
 | F3 | Find next |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 | Markdown / Split / Rendered view |
 | Ctrl+= / Ctrl+- / Ctrl+wheel | Zoom |
+| Ctrl+Shift+Minus | Insert an em dash (—) in either editing pane |
 | Ctrl+B / Ctrl+I | Bold / Italic |
 | Ctrl+K | Link |
 | Ctrl+Shift+K | Inline code (a code block when several lines are selected) |
 | Ctrl+Shift+H | Heading: cycles H1, H2, H3, plain text |
 | Ctrl+Shift+L | Bulleted list on or off |
+
+In the rendered pane, typing two hyphens followed by a space changes `-- ` to
+`— ` and retains the space, ready for the next word. This applies to typed text
+outside code, not pasted text or runs of three or more hyphens. The source pane
+keeps typed hyphens unchanged. Ctrl+Shift+Minus replaces the selected text, or
+inserts at the caret; Ctrl+Minus still zooms out. Find input keeps its own focus.
+Both em dash actions use the shared Undo/Redo history.
+
+Rendered typing updates the active text node and its source map together, so
+leading, trailing and repeated spaces stay editable without rebuilding each
+word. Paragraph splits and other structural edits restore the selection. Native
+input and IME composition are recorded as source splices as well.
 
 ## Self-test
 
