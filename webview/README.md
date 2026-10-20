@@ -69,3 +69,19 @@ input and IME composition are recorded as source splices as well.
 
 `tinymd-webview.exe --selftest out.json` runs the rendered-editing checks in
 `selftest.js` inside a hidden window and writes the results to `out.json`.
+
+For the full verification gate, run from the repository root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File webview/verify.ps1
+```
+
+Requires Windows PowerShell, Node.js and Go on `PATH`, plus the Edge WebView2
+Runtime. The script checks JavaScript syntax, runs Go tests, builds the production
+executable, and runs all WebView2 self-tests through the normal CLI. It fails on
+command failures, failed checks, page errors, or inconsistent result counts.
+
+The executable, `verify.log` transcript and `selftest.json` remain in a unique
+directory under the system temporary directory; the script prints its location
+and restores the original working directory. No build or runtime artifacts are
+written into the checkout, and the installed application is unchanged.
