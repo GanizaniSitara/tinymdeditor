@@ -347,7 +347,7 @@ func installMenuWndProc(w webview2.WebView) {
 }
 
 func showAboutDialog(hwnd uintptr) {
-	text := utf16From("TinyMD\nMarkdown editor for Windows.")
+	text := utf16From("TinyMD\nMarkdown editor for Windows.\n\nCtrl+Shift+Minus: insert an em dash in either pane, replacing selected text.\nRendered pane: type two hyphens then a space to get an em dash and retained space (outside code; not paste or longer hyphen runs).\nCtrl+Minus: zoom out. Em dash edits support Undo/Redo.")
 	title := utf16From("About TinyMD")
 	messageBoxW.Call(hwnd, uintptr(unsafe.Pointer(&text[0])), uintptr(unsafe.Pointer(&title[0])), mbOk|mbInfo)
 }

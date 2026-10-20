@@ -43,7 +43,398 @@ window.addEventListener('DOMContentLoaded', function() {
     '- first item\n- second *item*\n\n> quoted line one\n> quoted line two\n>\n> second quoted paragraph\n\n' +
     '| Name | Value |\n| :--- | ---: |\n| alpha | 1 |\n| beta 😀 | 2 |\n\n```go\nfunc main() {\n\tprintln("hi")\n}\n```\n\n---\n\n1. one\n2. two\n';
 
+
+  function input(type, data) {
+    var p=document.getElementById('preview');
+    p.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:type,data:data}));
+  }
+  function assertSource(want) { var r=expect(want); if (r !== true) throw new Error(r); }
+  function caretSource() {
+    var s=window.getSelection(), bs=T().blocks();
+    for (var b=0;b<bs.length;b++) {
+      if (!bs[b].el.contains(s.focusNode)) continue;
+      var r=document.createRange(); r.setStart(bs[b].el,0); r.setEnd(s.focusNode,s.focusOffset);
+      var i=r.toString().length,m=T().blockMap(bs[b]).map;
+      return i && m[i-1]>=0 ? m[i-1]+1 : m[i]>=0 ? m[i] : bs[b].start;
+    }
+    return -1;
+  }
+  function sequence(text, want, at, stable) {
+    var p=document.getElementById('preview'), node=window.getSelection().focusNode;
+    for (var c of text) {
+      input('insertText',c); want=want.slice(0,at)+c+want.slice(at); at+=c.length;
+      assertSource(want);
+      if (caretSource() !== at) throw new Error('caret '+caretSource()+' want '+at+' after '+JSON.stringify(c));
+      if (stable && node !== window.getSelection().focusNode) throw new Error('active text node replaced');
+      if (!p.contains(window.getSelection().focusNode)) throw new Error('selection left preview');
+    }
+    return {source:want,at:at};
+  }
+  function editingChecks() {
+
+    [
+      {name:'list',prefix:'- ',separator:'\n- '},
+      {name:'ordered list',prefix:'1. ',separator:'\n2. '},
+      {name:'quote',prefix:'> ',separator:'\n>\n> '}
+    ].forEach(function(context) {
+      ['*','~~','***'].forEach(function(mark) {
+        [false,true].forEach(function(native) {
+          check('contextual formatted split '+context.name+' '+mark+' native='+native,function() {
+            var original=context.prefix+mark+'firstsecond'+mark+'\n';load(original);
+            var p=document.getElementById('preview');p.focus();place('firstsecond',5);
+            if(native){if(!document.execCommand('insertParagraph',false))throw new Error('native split refused');}
+            else input('insertParagraph');
+            var before=context.prefix+mark+'first'+mark+context.separator+mark;
+            var want=before+'second'+mark+'\n';assertSource(want);
+            if(caretSource()!==before.length)throw new Error('contextual caret '+caretSource());
+            if(p.textContent.indexOf(mark)>=0)throw new Error('visible formatting delimiters');
+            sequence('X',want,before.length,true);
+            T().undo();assertSource(want);T().undo();assertSource(original);
+            T().redo();assertSource(want);T().redo();assertSource(before+'Xsecond'+mark+'\n');return true;
+          });
+        });
+      });
+    });
+
+    [
+      {name:'list', source:'- **firstsecond**\n', want:'- **first**\n- **second**\n'},
+      {name:'quote', source:'> **firstsecond**\n', want:'> **first**\n>\n> **second**\n'}
+    ].forEach(function(test) {
+      [false, true].forEach(function(native) {
+        check('formatted Enter retains wrappers in ' + test.name + ' native=' + native, function() {
+          load(test.source);
+          var p = document.getElementById('preview'); p.focus(); place('firstsecond', 5);
+          if (native) {
+            if (!document.execCommand('insertParagraph', false)) throw new Error('native Enter refused');
+          } else input('insertParagraph');
+          assertSource(test.want);
+          if (p.querySelectorAll('strong').length !== 2) throw new Error('split lost inline formatting');
+          var at = test.want.indexOf('second');
+          sequence('X', test.want, at, true);
+          T().undo(); assertSource(test.want); T().undo(); assertSource(test.source);
+          return true;
+        });
+      });
+    });
+    [false, true].forEach(function(forward) {
+      check('native deletion retains the intended repeated-character formatting ' + forward, function() {
+        load('**a**a\n');
+        var p = document.getElementById('preview'); p.focus();
+        var strong = p.querySelector('strong').firstChild;
+        var offset = forward ? 0 : 1;
+        window.getSelection().setBaseAndExtent(strong, offset, strong, offset);
+        if (!document.execCommand(forward ? 'forwardDelete' : 'delete', false)) throw new Error('native deletion refused');
+        assertSource('a\n');
+        sequence('X', 'a\n', 0, false);
+        return true;
+      });
+    });
+
+    ['**','*','~~'].forEach(function(mark) {
+      [false,true].forEach(function(forward) {
+        check('native repeated deletion and history '+mark+' '+forward,function() {
+          var original=mark+'aa'+mark+'a\n';load(original);var p=document.getElementById('preview');p.focus();
+          var run=p.querySelector(mark==='**'?'strong':mark==='*'?'em':'del').firstChild;
+          window.getSelection().setBaseAndExtent(run,forward?0:1,run,forward?0:1);
+          document.execCommand(forward?'forwardDelete':'delete',false);
+          assertSource(mark+'a'+mark+'a\n');
+          if(caretSource()!==mark.length)throw new Error('native deletion caret');
+          sequence('X',mark+'a'+mark+'a\n',mark.length,true);
+          T().undo();assertSource(original);T().redo();assertSource(mark+'Xa'+mark+'a\n');return true;
+        });
+      });
+    });
+    check('literal punctuation survives native deletion',function() {
+      load('a_b_c\n');var p=document.getElementById('preview');p.focus();place('b',1);
+      document.execCommand('delete',false);assertSource('a__c\n');return true;
+    });
+    ['**','*','~~','***'].forEach(function(mark) {
+      check('balanced paragraph split source caret and history '+mark,function() {
+        var original=mark+'firstsecond'+mark+'\n';load(original);var p=document.getElementById('preview');p.focus();place('firstsecond',5);
+        input('insertParagraph');var want=mark+'first'+mark+'\n\n'+mark+'second'+mark+'\n';assertSource(want);
+        var at=(mark+'first'+mark+'\n\n'+mark).length;
+        if(caretSource()!==at)throw new Error('balanced split caret');
+        sequence('X',want,at,true);T().undo();assertSource(want);T().undo();assertSource(original);
+        T().redo();assertSource(want);T().redo();assertSource(want.slice(0,at)+'X'+want.slice(at));return true;
+      });
+    });
+    check('native formatted paragraph split keeps source and caret',function() {
+      load('**firstsecond**\n');var p=document.getElementById('preview');p.focus();place('firstsecond',5);
+      document.execCommand('insertParagraph',false);assertSource('**first**\n\n**second**\n');
+      sequence('X','**first**\n\n**second**\n',13,true);return true;
+    });
+
+    check('formatted paragraph split keeps formatting and subsequent typing', function() {
+      load('**firstsecond**\n');
+      var p = document.getElementById('preview'); p.focus(); place('firstsecond', 5);
+      input('insertParagraph');
+      var paragraphs = p.querySelectorAll('p');
+      if (paragraphs.length !== 2 || !paragraphs[0].querySelector('strong') || !paragraphs[1].querySelector('strong')) {
+        throw new Error('split lost bold formatting: ' + JSON.stringify({source:T().source(),html:p.innerHTML}));
+      }
+      input('insertText', 'X');
+      if (p.querySelectorAll('p')[1].textContent !== 'Xsecond') throw new Error('split follow-on caret');
+      return true;
+    });
+    [
+      {source:'hello world\n',find:'hello',offset:2,at:2},
+      {source:'hello\n',find:'hello',offset:5,at:5},
+      {source:'hello\n',find:'hello',offset:0,at:0},
+      {source:'a **bold** z\n',find:'bold',offset:2,at:6},
+      {source:'',at:0}
+    ].forEach(function(test) {
+      check('sequential source/caret/stable DOM '+JSON.stringify(test),function() {
+        load(test.source); var p=document.getElementById('preview'); p.focus();
+        if (test.find) place(test.find,test.offset);
+        else { var el=T().blocks()[0].el.querySelector('p'); window.getSelection().setBaseAndExtent(el,0,el,0); }
+        // First insertion creates a text node in an empty paragraph.
+        var first=sequence('x',test.source,test.at,!!test.find);
+        sequence('  next word  ',first.source,first.at,true);
+        return true;
+      });
+    });
+    [false,true].forEach(function(backward) {
+      check('directional selection replacement '+backward,function() {
+        load('one target end\n'); document.getElementById('preview').focus();
+        var a=locate('target',0),z=locate('target',6),s=window.getSelection();
+        s.setBaseAndExtent(backward?z.node:a.node,backward?z.off:a.off,backward?a.node:z.node,backward?a.off:z.off);
+        input('insertText','X'); assertSource('one X end\n');
+        if (caretSource() !== 5) throw new Error('replacement caret');
+        sequence('Y','one X end\n',5,true);
+        T().undo(); assertSource('one target end\n'); T().redo(); assertSource('one XY end\n');
+        return true;
+      });
+    });
+    check('event split join and follow-on typing',function() {
+      load('firstsecond\n'); document.getElementById('preview').focus(); place('firstsecond',5);
+      input('insertParagraph'); assertSource('first\n\nsecond\n');
+      if (caretSource() !== 7) throw new Error('split caret');
+      input('deleteContentBackward'); assertSource('firstsecond\n');
+      sequence(' X','firstsecond\n',5,true);
+      place('second',6); input('insertParagraph'); input('insertText','n'); input('insertText',' '); input('insertText','z');
+      return expect('first Xsecond\n\nn z\n');
+    });
+    check('plain multiline paste once and follow-on typing',function() {
+      load('hello end\n'); var p=document.getElementById('preview'); p.focus(); place('hello',5);
+      var d=new DataTransfer(); d.setData('text/plain',' A\r\n\r\nB ');
+      p.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:d}));
+      assertSource('hello A\n\nB  end\n');
+      sequence('next','hello A\n\nB  end\n',11,true);
+      return true;
+    });
+
+
+    check('native repeated-character formatting boundary on both sides',function() {
+      load('**a**a\n');var p=document.getElementById('preview');p.focus();
+      var strong=p.querySelector('strong').firstChild;window.getSelection().setBaseAndExtent(strong,1,strong,1);
+      document.execCommand('insertText',false,'a');assertSource('**aa**a\n');
+      sequence('x','**aa**a\n',4,true);
+      load('**a**a\n');p.focus();var plain=p.querySelector('p').lastChild;
+      window.getSelection().setBaseAndExtent(plain,0,plain,0);
+      p.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:false,inputType:'insertText',data:'a'}));
+      document.execCommand('insertText',false,'a');assertSource('**a**aa\n');return true;
+    });
+    [false,true].forEach(function(ime) {
+      check('native replacement across formatting '+ime,function() {
+        load('a **bold** c\n');var p=document.getElementById('preview');p.focus();
+        var a=locate('bold',1),z=locate(' c',2);window.getSelection().setBaseAndExtent(a.node,a.off,z.node,z.off);
+        if(ime)p.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
+        else p.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:false,inputType:'insertReplacementText',data:'X'}));
+        document.execCommand('insertText',false,'X');
+        if(ime)p.dispatchEvent(new CompositionEvent('compositionend',{bubbles:true,data:'X'}));
+        assertSource('a **bX**\n');if(caretSource()!==6)throw new Error('formatted native caret');
+        sequence('Y','a **bX**\n',6,true);return true;
+      });
+    });
+    [false,true].forEach(function(backward) {
+      check('formatted paragraph replacement direction '+backward,function() {
+        load('**firsttail**\n\nheadlast');var p=document.getElementById('preview');p.focus();
+        var a=locate('tail',0),z=locate('head',4),s=window.getSelection();
+        s.setBaseAndExtent(backward?z.node:a.node,backward?z.off:a.off,backward?a.node:z.node,backward?a.off:z.off);
+        input('insertText','X');assertSource('**firstX**last');sequence('Y','**firstX**last',8,true);
+        load('**first**\n\nlast');p.focus();place('last',0);input('deleteContentBackward');
+        assertSource('**first**last');sequence('X','**first**last',7,true);return true;
+      });
+    });
+    check('list exit successive Enter and Backspace',function() {
+      load('- one\n');var p=document.getElementById('preview');p.focus();place('one',3);
+      input('insertParagraph');input('insertParagraph');assertSource('- one\n\n\n');
+      input('insertParagraph');assertSource('- one\n\n\n\n\n');
+      input('deleteContentBackward');assertSource('- one\n\n\n');
+      input('insertText','z');assertSource('- one\n\nz\n');return true;
+    });
+
+    check('native cross paragraph replacement matching local offsets',function() {
+      load('first tail\n\nsecond last');var p=document.getElementById('preview');p.focus();
+      var a=locate('tail',0),z=locate('second',6);window.getSelection().setBaseAndExtent(a.node,a.off,z.node,z.off);
+      document.execCommand('insertText',false,'X');assertSource('first X last');
+      sequence('Y','first X last',7,true);return true;
+    });
+    check('native cross paragraph replacement',function() {
+      load('first tail\n\nhead last');var p=document.getElementById('preview');p.focus();
+      var a=locate('tail',0),z=locate('head',4);window.getSelection().setBaseAndExtent(a.node,a.off,z.node,z.off);
+      document.execCommand('insertText',false,'X');
+      results.push({name:'native cross paragraph trace',ok:true,detail:JSON.stringify({source:T().source(),html:p.innerHTML})});
+      assertSource('first X last');sequence('Y','first X last',7,true);return true;
+    });
+    check('native paragraph split preserves source and caret',function() {
+      load('firstsecond');var p=document.getElementById('preview');p.focus();place('firstsecond',5);
+      if(!document.execCommand('insertParagraph',false))throw new Error('native split refused');
+      results.push({name:'native split DOM trace',ok:true,detail:JSON.stringify({html:p.innerHTML,source:T().source(),caret:caretSource()})});
+      assertSource('first\n\nsecond');if(caretSource()!==7)throw new Error('native split caret');
+      sequence('X','first\n\nsecond',7,true);return true;
+    });
+    check('native input after paragraph-end Enter and whitespace-only replacement',function() {
+      load('first\n'); var p=document.getElementById('preview');p.focus();place('first',5);
+      input('insertParagraph');assertSource('first\n\n\n');
+      document.execCommand('insertText',false,'n');assertSource('first\n\nn\n');
+      sequence('  z','first\n\nn\n',8,true);
+      load('x');p.focus();select('x');input('deleteContentBackward');assertSource('');
+      input('insertText',' ');assertSource(' ');
+      sequence('  x',' ',1,true);
+      return true;
+    });
+    check('repeated Enter commits blank paragraphs then Backspace joins',function() {
+      load('first');var p=document.getElementById('preview');p.focus();place('first',5);
+      input('insertParagraph');assertSource('first\n\n');
+      input('insertParagraph');assertSource('first\n\n\n\n');
+      if(caretSource()!==9)throw new Error('repeated Enter caret '+caretSource());
+      input('deleteContentBackward');assertSource('first\n\n');
+      input('insertText','z');assertSource('first\n\nz');
+      input('deleteContentBackward');assertSource('first\n\n');
+      input('deleteContentBackward');assertSource('first');
+      sequence(' next','first',5,true);return true;
+    });
+    check('list and table maps remain current after ordinary text and empty items',function() {
+      load('- first\n- second\n');var p=document.getElementById('preview');p.focus();place('first',2);
+      sequence('  x','- first\n- second\n',4,true);
+      place('second',6);input('insertParagraph');input('insertText','z');
+      assertSource('- fi  xrst\n- second\n- z\n');
+      load('| Name | Value |\n| --- | --- |\n| alpha | 1 |\n');p.focus();place('alpha',2);
+      var at=T().source().indexOf('alpha')+2;sequence('  x',T().source(),at,true);
+      return true;
+    });
+    [false,true].forEach(function(backward) {
+      check('cross paragraph replacement and deletion '+backward,function() {
+        load('first tail\n\nhead last\n');var p=document.getElementById('preview');p.focus();
+        var a=locate('tail',0),z=locate('head',4),s=window.getSelection();
+        s.setBaseAndExtent(backward?z.node:a.node,backward?z.off:a.off,backward?a.node:z.node,backward?a.off:z.off);
+        input('insertText','X');assertSource('first X last\n');sequence('Y','first X last\n',7,true);
+        load('first tail\n\nhead last\n');p.focus();a=locate('tail',0);z=locate('head',4);
+        s.setBaseAndExtent(a.node,a.off,z.node,z.off);input('deleteContentBackward');
+        assertSource('first  last\n');sequence('Z','first  last\n',6,true);return true;
+      });
+    });
+    check('em dash at end retains space and following word',function() {
+      load('a');document.getElementById('preview').focus();place('a',1);
+      input('insertText','-');input('insertText','-');input('insertText',' ');
+      assertSource('a— ');if(caretSource()!==3)throw new Error('end dash caret');
+      sequence('word','a— ',3,true);return true;
+    });
+    check('em dash shortcut keeps find focus and Ctrl+Minus zoom',function() {
+      load('abc');var box=document.getElementById('ask');box.style.display='inline-flex';var ask=document.getElementById('askInput');ask.focus();ask.value='find';
+      if(document.activeElement!==ask)throw new Error('find input did not receive focus');
+      var e=new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'_',code:'Minus',ctrlKey:true,shiftKey:true});
+      ask.dispatchEvent(e);assertSource('abc');if(e.defaultPrevented)throw new Error('find shortcut consumed');
+      box.style.display='none';var p=document.getElementById('preview');p.focus();place('abc',3);
+      var before=document.documentElement.style.getPropertyValue('--z');
+      var minus=new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'-',code:'Minus',ctrlKey:true});
+      p.dispatchEvent(minus);if(!minus.defaultPrevented)throw new Error('zoom shortcut unhandled');
+      if(document.documentElement.style.getPropertyValue('--z')===before)throw new Error('zoom did not change');
+      p.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'=',ctrlKey:true}));
+      assertSource('abc');return true;
+    });
+
+    check('composition commits DOM text once and keeps following caret',function() {
+      load('alpha end\n'); var p=document.getElementById('preview'); p.focus(); place('alpha',5);
+      p.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
+      document.execCommand('insertText',false,'漢');
+      document.execCommand('insertText',false,'字');
+      assertSource('alpha end\n');
+      p.dispatchEvent(new CompositionEvent('compositionend',{bubbles:true,data:'漢字'}));
+      p.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertCompositionText',data:'漢字'}));
+      assertSource('alpha漢字 end\n');
+      sequence(' next','alpha漢字 end\n',7,true);
+      T().undo(); assertSource('alpha end\n'); T().redo(); assertSource('alpha漢字 next end\n');
+      return true;
+    });
+    [false,true].forEach(function(source) {
+      check('collapsed dash shortcut and follow-on input '+source,function() {
+        load('abc');var ed=document.getElementById('editor'),p=document.getElementById('preview');
+        if(source){ed.focus();T().setPane('editor');ed.setSelectionRange(1,1);}else{p.focus();place('abc',1);}
+        document.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'_',code:'Minus',ctrlKey:true,shiftKey:true}));
+        assertSource('a—bc');
+        if(source){if(ed.selectionStart!==2)throw new Error('collapsed source caret');document.execCommand('insertText',false,'X');}
+        else sequence('X','a—bc',2,true);
+        assertSource('a—Xbc');T().undo();assertSource('a—bc');T().undo();assertSource('abc');
+        T().redo();assertSource('a—bc');T().redo();assertSource('a—Xbc');return true;
+      });
+    });
+    check('em dash conversion space word middle and history',function() {
+      load('left right\n'); document.getElementById('preview').focus(); place('left',4);
+      input('insertText','-'); input('insertText','-'); input('insertText',' ');
+      assertSource('left—  right\n');
+      if(caretSource()!==6) throw new Error('dash delimiter caret');
+      sequence('word','left—  right\n',6,true);
+      T().undo(); assertSource('left—  right\n'); T().undo(); assertSource('left-- right\n');
+      T().redo(); assertSource('left—  right\n');
+      return true;
+    });
+    check('em dash conversion exclusions',function() {
+      ['a---','a \u0060--\u0060','\u0060\u0060\u0060\n--\n\u0060\u0060\u0060'].forEach(function(src) {
+        load(src); document.getElementById('preview').focus(); place('--',2); input('insertText',' ');
+        if (T().source().indexOf('—')>=0) throw new Error('converted code or longer run');
+      });
+      load('a'); document.getElementById('preview').focus(); place('a',1);
+      var d=new DataTransfer();d.setData('text/plain','-- ');
+      document.getElementById('preview').dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:d}));
+      return expect('a-- ');
+    });
+    [false,true].forEach(function(source) {
+      check('em dash shortcut selection and history '+source,function() {
+        load('one target end'); var ed=document.getElementById('editor'),p=document.getElementById('preview');
+        if(source) { ed.focus();T().setPane('editor');ed.setSelectionRange(4,10,'backward'); }
+        else {p.focus();select('target');}
+        document.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,cancelable:true,key:'_',code:'Minus',ctrlKey:true,shiftKey:true}));
+        assertSource('one — end');
+        if(source) { if(ed.selectionStart!==5 || ed.selectionEnd!==5) throw new Error('source dash caret'); }
+        else if(caretSource()!==5) throw new Error('preview dash caret');
+        T().undo(); assertSource('one target end'); T().redo(); assertSource('one — end');
+        return true;
+      });
+    });
+  }
+
   function run() {
+    editingChecks();
+    check('sequential preview space trace', function() {
+      load('seed');
+      var preview = document.getElementById('preview');
+      preview.focus(); place('seed', 4);
+      var node = window.getSelection().focusNode, trace = [], want = 'seed';
+      for (var ch of '  hello world') {
+        preview.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, cancelable:true, inputType:'insertText', data:ch}));
+        want += ch;
+        var sel = window.getSelection();
+        trace.push({key:ch, source:T().source(), visible:preview.textContent, caret:sel.focusOffset, sameNode:sel.focusNode === node});
+      }
+      results.push({name:'runtime character trace', ok:true, detail:JSON.stringify(trace)});
+      return T().source() === want ? true : JSON.stringify(trace);
+    });
+    check('native WebView typing baseline', function() {
+      load('seed'); var p=document.getElementById('preview'); p.focus(); place('seed',4);
+      var trace=[];
+      p.addEventListener('input', function traceInput(e) { trace.push({type:e.inputType,trusted:e.isTrusted}); }, {once:true});
+      var want='seed',node=window.getSelection().focusNode;
+      for (var c of ' hello') {
+        if(!document.execCommand('insertText',false,c)) throw new Error('native input refused');
+        want+=c; assertSource(want);
+        if(caretSource()!==want.length) throw new Error('native per-character caret');
+        if(window.getSelection().focusNode!==node) throw new Error('native node replaced');
+      }
+      results.push({name:'native runtime trace',ok:true,detail:JSON.stringify({source:T().source(),text:p.textContent,events:trace})});
+      return expect('seed hello');
+    });
     check('the page became editable', function() {
       load(sample);
       return T().editable() || 'rendered pane is read-only';
@@ -126,7 +517,7 @@ window.addEventListener('DOMContentLoaded', function() {
       place('one', 3);
       T().pressEnter();
       T().pressEnter();
-      if (T().source() !== '- one\n') return 'after second Enter: ' + JSON.stringify(T().source());
+      if (T().source() !== '- one\n\n\n') return 'after second Enter: ' + JSON.stringify(T().source());
       T().typeText('after');
       return expect('- one\n\nafter\n');
     });

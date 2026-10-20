@@ -5,6 +5,10 @@ rendered pane you can edit directly, or both side by side. The code lives in
 [`webview/`](webview/); see [`webview/README.md`](webview/README.md) for building,
 features and shortcuts.
 
+Use **Ctrl+Shift+Minus** to insert an em dash in either pane. In the rendered
+pane, typing `--` followed by a space produces `— `, keeping the space. See the
+[keyboard shortcuts](webview/README.md#keyboard-shortcuts) for details.
+
 ## History
 
 TinyMD started as four prototypes comparing rendering back ends: WebView2,
