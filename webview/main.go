@@ -163,6 +163,7 @@ const (
 	idEditPaste  = 1104
 	idEditAll    = 1105
 	idHelpAbout  = 1201
+	idHelpRef    = 1202
 )
 
 var (

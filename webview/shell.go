@@ -272,6 +272,8 @@ func installMainMenu(w webview2.WebView) {
 	appendMenu(formatMenu, mfString, idFmtHeading, "&Heading (cycles)\tCtrl+Shift+H")
 	appendMenu(formatMenu, mfString, idFmtList, "Bulleted Li&st\tCtrl+Shift+L")
 
+	appendMenu(helpMenu, mfString, idHelpRef, "Markdown &Reference	F1")
+	appendMenu(helpMenu, mfSeparator, 0, "")
 	appendMenu(helpMenu, mfString, idHelpAbout, "&About TinyMD")
 
 	appendMenu(menu, mfPopup, fileMenu, "&File")
@@ -310,7 +312,7 @@ var menuCommands = map[uintptr]string{
 	idViewZoomIn: "zoomIn", idViewZoomOut: "zoomOut", idViewZoomReset: "zoomReset",
 	idViewWideMargins: "wide",
 	idFmtBold:         "bold", idFmtItalic: "italic", idFmtHeading: "heading", idFmtList: "list",
-	idFmtLink: "link", idFmtCode: "code",
+	idFmtLink: "link", idFmtCode: "code", idHelpRef: "reference",
 }
 
 func handleMenuCommand(w webview2.WebView, id uintptr) bool {

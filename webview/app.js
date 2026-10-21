@@ -711,7 +711,7 @@ function resetHistory() {
 
 function record(v, caret, anchor, at, kind) {
   var now = Date.now();
-  if (kind === 'type' && lastKind === 'type' && now - lastTime < 1000 && hi === hist.length - 1 && hi > 0) {
+  if (kind === 'type' && lastKind === 'type' && now - lastTime < 1000 && hi === hist.length - 1 && hi > 0 && at === hist[hi].c) {
     hist[hi].v = v; hist[hi].c = caret; hist[hi].a = anchor;
   } else {
     hist = hist.slice(0, hi + 1);
@@ -1246,6 +1246,7 @@ window.tinyMdHandleEditorShortcut = handleEditorShortcut;
 // ---------------------------------------------------------------- commands
 
 var commands = {
+  reference: function() { document.getElementById('reference').showModal(); },
   'new': newDocument,
   open: openDocument,
   save: saveDocument,
@@ -1303,6 +1304,8 @@ var SHORTCUTS = {
 };
 
 document.addEventListener('keydown', async function(e) {
+  if (document.getElementById('reference').open) return;
+  if (e.key === 'F1') { e.preventDefault(); commands.reference(); return; }
   if (e.key === 'F3') { e.preventDefault(); findNext(); return; }
   if (e.key === 'Insert' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
     e.preventDefault();
@@ -1603,10 +1606,22 @@ window.addEventListener('blur', function() {
 
 // ---------------------------------------------------------------- source pane
 
+// Native undo requests (for example WebView's edit commands) must use the same
+// history as Ctrl+Z and rendered edits, rather than the textarea's native stack.
+var sourceInputStart = null;
+editor.addEventListener('beforeinput', function(e) {
+  sourceInputStart = editor.selectionStart;
+  if (e.inputType !== 'historyUndo' && e.inputType !== 'historyRedo') return;
+  e.preventDefault();
+  if (e.inputType === 'historyUndo') undo(); else redo();
+});
+
 editor.addEventListener('input', function(e) {
   clearHighlight();
   var kind = e.inputType === 'insertText' ? 'type' : 'edit';
-  record(editor.value, editor.selectionEnd, editor.selectionStart, editor.selectionStart, kind);
+  var at = sourceInputStart === null ? editor.selectionStart : sourceInputStart;
+  sourceInputStart = null;
+  record(editor.value, editor.selectionEnd, editor.selectionStart, at, kind);
   render();
   updateDirty();
   schedulePreviewHighlight();

@@ -71,6 +71,35 @@ window.addEventListener('DOMContentLoaded', function() {
     return {source:want,at:at};
   }
   function editingChecks() {
+    ['firstsecond','**firstsecond**','- firstsecond','firstsecond\n'].forEach(function(source) {
+      check('native spaces between words '+JSON.stringify(source),function() {
+        load(source);document.getElementById('preview').focus();place('firstsecond',5);
+        document.execCommand('insertText',false,' ');
+        document.execCommand('insertText',false,' ');
+        document.execCommand('insertText',false,'X');
+        assertSource(source.replace('firstsecond','first  Xsecond'));
+        return true;
+      });
+    });
+    check('repeated Enter between paragraphs creates visible vertical space',function() {
+      load('first\n\nsecond');
+      var p=document.getElementById('preview');p.focus();place('first',5);
+      var before=locate('second',0).node.parentElement.getBoundingClientRect().top;
+      input('insertParagraph');
+      input('insertParagraph');
+      var after=locate('second',0).node.parentElement.getBoundingClientRect().top;
+      if(after <= before+10)throw new Error('extra Enter produced no visible gap: '+before+' -> '+after+' source '+JSON.stringify(T().source()));
+      return true;
+    });
+    check('spaces between words increase the visible gap in formatted text',function() {
+      load('**firstsecond**');
+      var p=document.getElementById('preview');p.focus();place('firstsecond',5);
+      input('insertText',' ');input('insertText',' ');
+      assertSource('**first  second**');
+      var n=locate('first',0).node,r=document.createRange();r.setStart(n,5);r.setEnd(n,7);
+      if(r.getBoundingClientRect().width<5)throw new Error('spaces have no visible width');
+      return true;
+    });
 
     [
       {name:'list',prefix:'- ',separator:'\n- '},
@@ -664,6 +693,32 @@ window.addEventListener('DOMContentLoaded', function() {
       return expect('Hello big world\n');
     });
 
+    check('reference opens without changing the document and explains spacing', function() {
+      load('unchanged\n');
+      T().commands.reference();
+      var dialog = document.getElementById('reference');
+      if (!dialog.open || dialog.textContent.indexOf('<br>') < 0) throw new Error('reference missing spacing help');
+      dialog.close();
+      assertSource('unchanged\n');
+      return true;
+    });
+    check('keyboard and native source undo retain multiple steps and redo', function() {
+      load('abc');
+      T().setPane('editor');
+      var ed = document.getElementById('editor');
+      ed.focus(); ed.setSelectionRange(3,3);
+      ed.setRangeText('d',3,3,'end');
+      ed.dispatchEvent(new InputEvent('input',{inputType:'insertText',data:'d'}));
+      ed.setSelectionRange(0,0);
+      ed.setRangeText('X',0,0,'end');
+      ed.dispatchEvent(new InputEvent('input',{inputType:'insertText',data:'X'}));
+      key(ed,'z',true); assertSource('abcd');
+      ed.dispatchEvent(new InputEvent('beforeinput',{inputType:'historyUndo',bubbles:true,cancelable:true}));
+      assertSource('abc');
+      key(ed,'y',true); assertSource('abcd');
+      key(ed,'y',true); assertSource('Xabcd');
+      return true;
+    });
     check('typing in the source pane renders and is undoable', function() {
       load('abc\n');
       T().setPane('editor');
