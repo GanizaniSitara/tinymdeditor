@@ -137,6 +137,12 @@ body.ctrl-down .preview-pane a { cursor: pointer; }
 .preview-pane img { max-width:100%; }
 .preview-pane hr { border:none; border-top:1px solid #ddd; margin:1em 0; }
 
+dialog { margin:auto; width:min(680px,94vw); max-height:85vh; overflow:auto; padding:24px; border:1px solid #bbb; border-radius:6px; font:14px Arial,sans-serif; }
+dialog::backdrop { background:rgba(0,0,0,.25); }
+dialog h3, dialog p, dialog pre { margin:12px 0; line-height:1.5; }
+dialog pre { background:#f5f5f5; padding:12px; white-space:pre-wrap; }
+dialog button { float:right; padding:5px 14px; }
+@media print { dialog { display:none !important; } }
 /* Scrollbar */
 ::-webkit-scrollbar { width:10px; }
 ::-webkit-scrollbar-track { background:#fff; }
@@ -173,6 +179,7 @@ body.ctrl-down .preview-pane a { cursor: pointer; }
   <button data-cmd="code" title="Inline code, or a code block for several lines (Ctrl+Shift+K)">Code</button>
   <span class="sep"></span>
   <button data-cmd="reveal" title="Open the folder containing this file in Explorer (Ctrl+E)">Folder</button>
+  <button data-cmd="reference" title="Markdown syntax and spacing (F1)">Reference</button>
   <span class="filename" id="fname">TinyMD</span>
   <span class="saved" id="saved">Saved!</span>
   <span class="ask" id="ask"><label id="askLabel">Find:</label><input id="askInput" spellcheck="false"></span>
@@ -188,6 +195,51 @@ body.ctrl-down .preview-pane a { cursor: pointer; }
   <div class="preview-pane" id="preview" spellcheck="false"></div>
 </div>
 
+<dialog id="reference" aria-labelledby="referenceTitle">
+  <form method="dialog"><button autofocus>Close</button></form>
+  <h2 id="referenceTitle">Markdown reference</h2>
+  <h3>Line breaks and extra vertical space</h3>
+  <p>In TinyMD's Markdown pane, Enter starts a new rendered line. Leave a blank line between paragraphs.</p>
+  <pre>First paragraph.
+
+Second paragraph.</pre>
+  <p>For an extra blank line, put <code>&lt;br&gt;</code> on its own line with blank lines around it. Repeat it for a larger gap.</p>
+  <pre>Text above.
+
+&lt;br&gt;
+
+Text below.</pre>
+  <p>For a portable Markdown line break, end a line with two spaces. Extra empty source lines are not a portable spacing rule; HTML support also varies between viewers.</p>
+  <h3>Common markup</h3>
+  <pre># Large heading
+## Smaller heading
+### Subheading
+**bold**    *italic*    ~~strikethrough~~
+- Bulleted item
+1. Numbered item
+[Link label](https://example.com)
+![Image description](image.png)
+`inline code`
+&gt; Quoted text
+---
+
+```text
+Code block
+```</pre>
+  <h3>Editing</h3>
+  <pre>Ctrl+Z / Ctrl+Y      Undo / Redo (Ctrl+Shift+Z also redoes)
+Ctrl+Shift+Minus     Em dash (&mdash;) in either pane, replacing any selection
+-- then Space        Em dash in the formatted pane (not in code or pasted text)
+Ctrl+B / Ctrl+I      Bold / Italic
+Ctrl+K               Link
+Ctrl+Shift+K         Inline code, or a code block over several lines
+Ctrl+Shift+H         Heading: cycles H1, H2, H3, plain text
+Ctrl+Shift+L         Bulleted list on or off
+Ctrl+F, F3           Find, Find next
+Ctrl+1 / 2 / 3       Markdown / Split / Formatted view</pre>
+  <p>You can type directly in the formatted pane; edits go into the Markdown and share one Undo history with it.</p>
+  <p>Ctrl+1 shows Markdown; Ctrl+2 shows Markdown and preview together. Ctrl+click opens links. Escape closes this reference.</p>
+</dialog>
 <script>
 var _initContent = "{{INIT_CONTENT}}";
 var _initFname = "{{INIT_FNAME}}";
