@@ -103,6 +103,13 @@ function render() {
     preview.appendChild(empty);
     blocks.push({start: 0, end: text.length, tok: {type:'paragraph', raw:text}, el:empty, text:'', map:[]});
   }
+  // marked puts a line break after a loose item's paragraph; under pre-wrap it would show as a blank line.
+  preview.querySelectorAll('li').forEach(function(li) {
+    if (!li.querySelector(':scope > p')) return;
+    Array.prototype.slice.call(li.childNodes).forEach(function(n) {
+      if (n.nodeType === 3 && !n.nodeValue.trim()) li.removeChild(n);
+    });
+  });
   // An empty list item cannot hold a caret until it has something in it.
   preview.querySelectorAll('li:empty').forEach(function(li) { li.appendChild(document.createElement('br')); });
   setEditable(ok);

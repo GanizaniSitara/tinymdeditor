@@ -504,6 +504,21 @@ window.addEventListener('DOMContentLoaded', function() {
       return expect(sample.replace('# Title é', '# Title! é'));
     });
 
+    check('a loose list shows no blank line inside its items', function() {
+      load('1. one\n\n2. two\n\n3. three\n');
+      var spare = Array.prototype.filter.call(document.querySelectorAll('.preview-pane li'), function(li) {
+        return Array.prototype.some.call(li.childNodes, function(n) { return n.nodeType === 3 && !n.nodeValue.trim(); });
+      });
+      return spare.length === 0 || spare.length + ' items keep a whitespace-only line';
+    });
+
+    check('typing in a loose list item edits only that item', function() {
+      load('1. one\n\n2. two\n');
+      place('two', 3);
+      T().typeText('!');
+      return expect('1. one\n\n2. two!\n');
+    });
+
     check('deleting the only bold character removes its markers', function() {
       load('a **b** c\n');
       place('b', 1);
