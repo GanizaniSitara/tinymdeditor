@@ -512,6 +512,21 @@ window.addEventListener('DOMContentLoaded', function() {
       return spare.length === 0 || spare.length + ' items keep a whitespace-only line';
     });
 
+    check('a nested list shows no blank line after its sublists', function() {
+      load('- a\n  - b\n    - c\n- d\n');
+      var spare = Array.prototype.filter.call(document.querySelectorAll('.preview-pane li'), function(li) {
+        return Array.prototype.some.call(li.childNodes, function(n) { return n.nodeType === 3 && !n.nodeValue.trim(); });
+      });
+      return spare.length === 0 || spare.length + ' items keep a whitespace-only line';
+    });
+
+    check('typing in a nested list item edits only that item', function() {
+      load('- a\n  - b\n- d\n');
+      place('b', 1);
+      T().typeText('!');
+      return expect('- a\n  - b!\n- d\n');
+    });
+
     check('typing in a loose list item edits only that item', function() {
       load('1. one\n\n2. two\n');
       place('two', 3);
