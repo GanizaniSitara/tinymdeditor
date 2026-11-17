@@ -184,8 +184,8 @@ func startSelftest(w webview2.WebView, out string, shotsDir string) {
 	hwnd := uintptr(w.Window())
 	if shotsDir != "" {
 		_ = os.MkdirAll(shotsDir, 0755)
-		const SWP_SHOWWINDOW = 0x0040
-		setWindowPos.Call(hwnd, 0, 0, 0, 1280, 900, SWP_SHOWWINDOW)
+		const SWP_SHOWWINDOW, SWP_NOACTIVATE = 0x0040, 0x0010
+		setWindowPos.Call(hwnd, 0, 0, 0, 1280, 900, SWP_SHOWWINDOW|SWP_NOACTIVATE)
 		updateWindowProc.Call(hwnd)
 		w.Bind("goShot", func(name string) string {
 			return captureWindow(hwnd, shotsDir, name)

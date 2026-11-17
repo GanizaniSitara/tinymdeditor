@@ -1277,6 +1277,27 @@ window.addEventListener('DOMContentLoaded', function() {
       { name: 'reverse: highlight API available', fn: async function() {
         return T().canHighlight() ? true : 'CSS custom highlights are not supported by this WebView2';
       } },
+      { name: 'indented dash lists: no tall gaps between items', shot: 'indented-dash-lists', fn: async function() {
+        load('Intro line\n- top one\n  - nested two-space\n  - nested again\n    - deeper\n- top two\n\n' +
+             '1. ordered\n   - under ordered\n   - under ordered 2\n2. ordered two\n\n' +
+             'Para then indented:\n  - indented one\n  - indented two\n\n' +
+             '- loose top\n\n  - loose nested\n\n- loose top two\n\n' +
+             '- tab\n\t- tab nested\n- after tab\n\nEnd.\n');
+        await new Promise(function(r) { setTimeout(r, 200); });
+        var lis = Array.prototype.slice.call(document.querySelectorAll('.preview-pane li'));
+        var bad = [];
+        for (var i = 1; i < lis.length; i++) {
+          if (lis[i - 1].closest('.blk') !== lis[i].closest('.blk')) continue;  // separate lists
+          var a = lis[i - 1].getBoundingClientRect(), b = lis[i].getBoundingClientRect();
+          var lh = parseFloat(getComputedStyle(lis[i]).lineHeight) || 24;
+          // a first nested item follows its parent's first line, any other item the previous item's end;
+          // a gap beyond ~1 line is a blank line
+          var prevLast = lis[i - 1].contains(lis[i]) ? a.top + lh : a.bottom;
+          var gap = b.top - prevLast;
+          if (gap > lh * 0.9) bad.push(lis[i].firstChild.textContent.trim() + ' gap=' + Math.round(gap));
+        }
+        return bad.length === 0 || bad.join('; ');
+      } },
       simple('heading', 'heading', sample, 'Title', 'range', ['Title']),
       simple('emphasis with its markers', 'emphasis', sample, '**bold**', 'range', ['bold']),
       simple('link source', 'link', sample, '[link](http://example.com)', 'range', ['link']),
